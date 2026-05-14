@@ -3,6 +3,9 @@ package io.github.stellhub.stellflow.sdk;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.github.stellhub.stellflow.sdk.client.RetryPolicy;
+import io.github.stellhub.stellflow.sdk.client.StellflowClientFactory;
+import io.github.stellhub.stellflow.sdk.client.StellflowClientOptions;
 import io.github.stellhub.stellflow.sdk.consumer.ConsumerGroupSession;
 import io.github.stellhub.stellflow.sdk.consumer.ConsumerRecord;
 import io.github.stellhub.stellflow.sdk.consumer.OffsetAndMetadata;
@@ -207,6 +210,54 @@ class StellflowProducerConsumerIntegrationTest {
               .offset());
 
       Thread.sleep(150);
+      consumer.close();
+    }
+  }
+
+  @Test
+  void shouldCreateProducerAndConsumerFromClientFactory() throws Exception {
+    int port = findFreePort();
+    BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
+    try (MiniBroker broker = MiniBroker.start(port);
+        StellflowClientFactory factory =
+            StellflowClientFactory.create(
+                StellflowClientOptions.builder(endpoint.address())
+                    .clientId("stellflow-sdk-it-factory")
+                    .retryPolicy(RetryPolicy.defaultPolicy())
+                    .consumerOptions(
+                        new StellflowConsumerOptions(
+                            "orders-factory-group",
+                            "",
+                            30_000,
+                            Duration.ofMillis(50),
+                            1024 * 1024,
+                            "factory-commit"))
+                    .build())) {
+      StellflowProducer producer = factory.createProducer();
+      StellflowConsumer consumer = factory.createConsumer();
+
+      producer
+          .send(
+              new ProducerRecord(
+                  "orders",
+                  0,
+                  "factory-key".getBytes(StandardCharsets.UTF_8),
+                  "factory-value".getBytes(StandardCharsets.UTF_8)))
+          .get(10, TimeUnit.SECONDS);
+
+      consumer.subscribe(List.of("orders")).get(10, TimeUnit.SECONDS);
+      List<ConsumerRecord> records = consumer.poll(Duration.ofSeconds(5)).get(10, TimeUnit.SECONDS);
+      consumer.commitSync(Duration.ofSeconds(5));
+
+      assertEquals(1, records.size());
+      assertEquals("orders", records.getFirst().topic());
+      assertEquals(0, records.getFirst().partition());
+      assertEquals(
+          1L,
+          consumer
+              .fetchOffset("orders-factory-group", "orders", 0)
+              .get(10, TimeUnit.SECONDS)
+              .offset());
       consumer.close();
     }
   }

@@ -214,7 +214,30 @@ SDK 核心包不引入任何 Spring / Spring Boot 依赖。可观测性通过 JD
 | `stellflow.consumer.offset.commits` | Counter | OffsetCommit 成功次数 |
 | `stellflow.consumer.group.operations` | Counter | Join / Sync / Heartbeat 操作次数 |
 
-### 6. Codec 层
+### 6. Client Factory 层
+
+SDK core 提供 `StellflowClientOptions` 和 `StellflowClientFactory` 作为可装配入口。它们只依赖 Java、Netty 和 OpenTelemetry API，不依赖 Spring：
+
+```java
+StellflowClientOptions options =
+    StellflowClientOptions.builder("127.0.0.1:9092")
+        .clientId("orders-service")
+        .consumerOptions(StellflowConsumerOptions.defaults("orders-group"))
+        .build();
+
+try (StellflowClientFactory factory = StellflowClientFactory.create(options)) {
+  StellflowProducer producer = factory.createProducer();
+  StellflowConsumer consumer = factory.createConsumer();
+
+  consumer.subscribe(List.of("orders")).join();
+  List<ConsumerRecord> records = consumer.poll(Duration.ofSeconds(5)).join();
+  consumer.commitSync(Duration.ofSeconds(5));
+}
+```
+
+后续 Stellflux 或 Spring Boot starter 的自动装配层应只负责把外部配置绑定成 `StellflowClientOptions`，再暴露 `StellflowClientFactory`、`StellflowProducer` 和 `StellflowConsumer`，不要把 Spring 类型下沉到 SDK core。
+
+### 7. Codec 层
 
 Codec 层必须保持纯协议语义，不依赖 Producer、Consumer 或 Admin 的业务对象：
 
