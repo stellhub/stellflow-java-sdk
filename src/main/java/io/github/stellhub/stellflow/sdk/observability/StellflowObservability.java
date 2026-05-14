@@ -10,7 +10,7 @@ public final class StellflowObservability {
     public static final String INSTRUMENTATION_SCOPE = "io.github.stellhub.stellflow.sdk";
 
     private static final StellflowObservability GLOBAL =
-            new StellflowObservability(GlobalOpenTelemetry.getOrNoop());
+            new StellflowObservability(GlobalOpenTelemetry.get());
 
     private final OpenTelemetry openTelemetry;
     private final StellflowClientMetrics metrics;
