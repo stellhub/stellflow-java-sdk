@@ -62,750 +62,750 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Stellflow Consumer 封装。 */
 public class StellflowConsumer implements AutoCloseable {
 
-  private static final byte COORDINATOR_KEY_TYPE_GROUP = 0;
-  private static final System.Logger LOGGER = System.getLogger(StellflowConsumer.class.getName());
+    private static final byte COORDINATOR_KEY_TYPE_GROUP = 0;
+    private static final System.Logger LOGGER = System.getLogger(StellflowConsumer.class.getName());
 
-  private final NettyStellflowClient client;
-  private final StellflowConnectionPool connectionPool;
-  private final MetadataManager metadataManager;
-  private final StellflowObservability observability;
-  private final String clientId;
-  private final StellflowConsumerOptions options;
-  private final RetryPolicy retryPolicy;
-  private final ScheduledExecutorService heartbeatExecutor;
-  private final boolean ownsClient;
-  private final boolean ownsConnectionPool;
-  private final AtomicBoolean closed = new AtomicBoolean();
-  private final Object stateLock = new Object();
-  private final Map<TopicPartition, Long> nextOffsets = new HashMap<>();
-  private final Map<TopicPartition, Long> consumedOffsets = new HashMap<>();
+    private final NettyStellflowClient client;
+    private final StellflowConnectionPool connectionPool;
+    private final MetadataManager metadataManager;
+    private final StellflowObservability observability;
+    private final String clientId;
+    private final StellflowConsumerOptions options;
+    private final RetryPolicy retryPolicy;
+    private final ScheduledExecutorService heartbeatExecutor;
+    private final boolean ownsClient;
+    private final boolean ownsConnectionPool;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final Object stateLock = new Object();
+    private final Map<TopicPartition, Long> nextOffsets = new HashMap<>();
+    private final Map<TopicPartition, Long> consumedOffsets = new HashMap<>();
 
-  private volatile Set<String> subscribedTopics = Set.of();
-  private volatile List<TopicPartition> assignment = List.of();
-  private volatile ConsumerRebalanceListener rebalanceListener = ConsumerRebalanceListener.noop();
-  private volatile ConsumerGroupSession groupSession;
-  private volatile ScheduledFuture<?> heartbeatTask;
+    private volatile Set<String> subscribedTopics = Set.of();
+    private volatile List<TopicPartition> assignment = List.of();
+    private volatile ConsumerRebalanceListener rebalanceListener = ConsumerRebalanceListener.noop();
+    private volatile ConsumerGroupSession groupSession;
+    private volatile ScheduledFuture<?> heartbeatTask;
 
-  public StellflowConsumer(NettyStellflowClient client, String clientId) {
-    this(
-        client,
-        clientId,
-        StellflowConsumerOptions.defaults(clientId),
-        RetryPolicy.defaultPolicy(),
-        false);
-  }
-
-  public StellflowConsumer(NettyStellflowClient client, String clientId, boolean ownsClient) {
-    this(
-        client,
-        clientId,
-        StellflowConsumerOptions.defaults(clientId),
-        RetryPolicy.defaultPolicy(),
-        ownsClient);
-  }
-
-  public StellflowConsumer(
-      NettyStellflowClient client, String clientId, RetryPolicy retryPolicy, boolean ownsClient) {
-    this(client, clientId, StellflowConsumerOptions.defaults(clientId), retryPolicy, ownsClient);
-  }
-
-  public StellflowConsumer(
-      NettyStellflowClient client,
-      String clientId,
-      StellflowConsumerOptions options,
-      RetryPolicy retryPolicy,
-      boolean ownsClient) {
-    this.client = Objects.requireNonNull(client, "client must not be null");
-    this.connectionPool = null;
-    this.metadataManager = null;
-    this.observability = client.observability();
-    this.clientId = Objects.requireNonNull(clientId, "clientId must not be null");
-    this.options = Objects.requireNonNull(options, "options must not be null");
-    this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy must not be null");
-    this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(this::newHeartbeatThread);
-    this.ownsClient = ownsClient;
-    this.ownsConnectionPool = false;
-  }
-
-  public StellflowConsumer(
-      StellflowConnectionPool connectionPool, MetadataManager metadataManager, String clientId) {
-    this(
-        connectionPool,
-        metadataManager,
-        clientId,
-        StellflowConsumerOptions.defaults(clientId),
-        RetryPolicy.defaultPolicy(),
-        false);
-  }
-
-  public StellflowConsumer(
-      StellflowConnectionPool connectionPool,
-      MetadataManager metadataManager,
-      String clientId,
-      RetryPolicy retryPolicy,
-      boolean ownsConnectionPool) {
-    this(
-        connectionPool,
-        metadataManager,
-        clientId,
-        StellflowConsumerOptions.defaults(clientId),
-        retryPolicy,
-        ownsConnectionPool);
-  }
-
-  public StellflowConsumer(
-      StellflowConnectionPool connectionPool,
-      MetadataManager metadataManager,
-      String clientId,
-      StellflowConsumerOptions options,
-      RetryPolicy retryPolicy,
-      boolean ownsConnectionPool) {
-    this.client = null;
-    this.connectionPool = Objects.requireNonNull(connectionPool, "connectionPool must not be null");
-    this.metadataManager =
-        Objects.requireNonNull(metadataManager, "metadataManager must not be null");
-    this.observability = connectionPool.observability();
-    this.clientId = Objects.requireNonNull(clientId, "clientId must not be null");
-    this.options = Objects.requireNonNull(options, "options must not be null");
-    this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy must not be null");
-    this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(this::newHeartbeatThread);
-    this.ownsClient = false;
-    this.ownsConnectionPool = ownsConnectionPool;
-  }
-
-  /** 订阅 topic 并启动消费组心跳。 */
-  public CompletableFuture<Void> subscribe(Collection<String> topics) {
-    return subscribe(options.groupId(), topics, ConsumerRebalanceListener.noop());
-  }
-
-  /** 使用指定 groupId 订阅 topic 并启动消费组心跳。 */
-  public CompletableFuture<Void> subscribe(String groupId, Collection<String> topics) {
-    return subscribe(groupId, topics, ConsumerRebalanceListener.noop());
-  }
-
-  /** 订阅 topic 并注册重平衡监听器。 */
-  public CompletableFuture<Void> subscribe(
-      Collection<String> topics, ConsumerRebalanceListener listener) {
-    return subscribe(options.groupId(), topics, listener);
-  }
-
-  /** 使用指定 groupId 订阅 topic 并注册重平衡监听器。 */
-  public CompletableFuture<Void> subscribe(
-      String groupId, Collection<String> topics, ConsumerRebalanceListener listener) {
-    ensureOpen();
-    if (metadataManager == null) {
-      return CompletableFuture.failedFuture(
-          new IllegalStateException("subscribe requires metadata routing mode"));
+    public StellflowConsumer(NettyStellflowClient client, String clientId) {
+        this(
+                client,
+                clientId,
+                StellflowConsumerOptions.defaults(clientId),
+                RetryPolicy.defaultPolicy(),
+                false);
     }
-    Set<String> uniqueTopics = validateTopics(topics);
-    ConsumerRebalanceListener newListener =
-        listener == null ? ConsumerRebalanceListener.noop() : listener;
-    ConsumerSubscriptionPayload subscriptionPayload =
-        new ConsumerSubscriptionPayload(options.memberId(), uniqueTopics.stream().toList());
-    byte[] encodedSubscription =
-        ConsumerAssignmentPayloadCodec.encodeSubscription(subscriptionPayload);
-    ConsumerAssignmentPayloadCodec.decodeSubscription(encodedSubscription);
-    return joinGroup(groupId, options.memberId(), options.sessionTimeoutMs())
-        .thenCompose(
-            session ->
-                syncGroup(session)
-                    .thenCompose(
-                        ignored -> loadAssignmentAndOffsets(groupId, uniqueTopics, newListener))
-                    .thenRun(
-                        () -> {
-                          synchronized (stateLock) {
-                            subscribedTopics = uniqueTopics;
-                            rebalanceListener = newListener;
-                            groupSession = session;
-                          }
-                          startHeartbeatLoop(session);
-                        }));
-  }
 
-  /** 手动指定分区，不加入消费组。 */
-  public void assign(Collection<TopicPartition> partitions) {
-    ensureOpen();
-    if (partitions == null || partitions.isEmpty()) {
-      throw new IllegalArgumentException("partitions must not be empty");
+    public StellflowConsumer(NettyStellflowClient client, String clientId, boolean ownsClient) {
+        this(
+                client,
+                clientId,
+                StellflowConsumerOptions.defaults(clientId),
+                RetryPolicy.defaultPolicy(),
+                ownsClient);
     }
-    List<TopicPartition> newAssignment = List.copyOf(partitions);
-    synchronized (stateLock) {
-      stopHeartbeatLoop();
-      groupSession = null;
-      rebalanceListener = ConsumerRebalanceListener.noop();
-      subscribedTopics = Set.of();
-      assignment = newAssignment;
-      nextOffsets.clear();
-      consumedOffsets.clear();
-      for (TopicPartition partition : newAssignment) {
-        nextOffsets.put(partition, 0L);
-      }
+
+    public StellflowConsumer(
+            NettyStellflowClient client, String clientId, RetryPolicy retryPolicy, boolean ownsClient) {
+        this(client, clientId, StellflowConsumerOptions.defaults(clientId), retryPolicy, ownsClient);
     }
-  }
 
-  /** 拉取当前订阅或分配的消息。 */
-  public CompletableFuture<List<ConsumerRecord>> poll(Duration timeout) {
-    ensureOpen();
-    List<TopicPartition> assignedPartitions = assignment;
-    if (assignedPartitions.isEmpty()) {
-      return CompletableFuture.completedFuture(List.of());
+    public StellflowConsumer(
+            NettyStellflowClient client,
+            String clientId,
+            StellflowConsumerOptions options,
+            RetryPolicy retryPolicy,
+            boolean ownsClient) {
+        this.client = Objects.requireNonNull(client, "client must not be null");
+        this.connectionPool = null;
+        this.metadataManager = null;
+        this.observability = client.observability();
+        this.clientId = Objects.requireNonNull(clientId, "clientId must not be null");
+        this.options = Objects.requireNonNull(options, "options must not be null");
+        this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy must not be null");
+        this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(this::newHeartbeatThread);
+        this.ownsClient = ownsClient;
+        this.ownsConnectionPool = false;
     }
-    List<CompletableFuture<List<ConsumerRecord>>> futures =
-        new ArrayList<>(assignedPartitions.size());
-    for (TopicPartition partition : assignedPartitions) {
-      futures.add(
-          fetch(
-              partition.topic(),
-              partition.partition(),
-              nextOffset(partition),
-              options.fetchMaxBytes()));
+
+    public StellflowConsumer(
+            StellflowConnectionPool connectionPool, MetadataManager metadataManager, String clientId) {
+        this(
+                connectionPool,
+                metadataManager,
+                clientId,
+                StellflowConsumerOptions.defaults(clientId),
+                RetryPolicy.defaultPolicy(),
+                false);
     }
-    CompletableFuture<List<ConsumerRecord>> result =
-        CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
-            .thenApply(
-                ignored -> {
-                  List<ConsumerRecord> records = new ArrayList<>();
-                  for (CompletableFuture<List<ConsumerRecord>> future : futures) {
-                    records.addAll(future.join());
-                  }
-                  updateConsumedOffsets(records);
-                  return records;
-                });
-    if (timeout == null || timeout.isZero() || timeout.isNegative()) {
-      return result;
+
+    public StellflowConsumer(
+            StellflowConnectionPool connectionPool,
+            MetadataManager metadataManager,
+            String clientId,
+            RetryPolicy retryPolicy,
+            boolean ownsConnectionPool) {
+        this(
+                connectionPool,
+                metadataManager,
+                clientId,
+                StellflowConsumerOptions.defaults(clientId),
+                retryPolicy,
+                ownsConnectionPool);
     }
-    return result.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
-  }
 
-  /** 同步拉取当前订阅或分配的消息。 */
-  public List<ConsumerRecord> pollSync(Duration timeout) {
-    try {
-      return poll(timeout).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new IllegalStateException("poll interrupted", exception);
-    } catch (Exception exception) {
-      throw new IllegalStateException("poll failed", exception);
+    public StellflowConsumer(
+            StellflowConnectionPool connectionPool,
+            MetadataManager metadataManager,
+            String clientId,
+            StellflowConsumerOptions options,
+            RetryPolicy retryPolicy,
+            boolean ownsConnectionPool) {
+        this.client = null;
+        this.connectionPool = Objects.requireNonNull(connectionPool, "connectionPool must not be null");
+        this.metadataManager =
+                Objects.requireNonNull(metadataManager, "metadataManager must not be null");
+        this.observability = connectionPool.observability();
+        this.clientId = Objects.requireNonNull(clientId, "clientId must not be null");
+        this.options = Objects.requireNonNull(options, "options must not be null");
+        this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy must not be null");
+        this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(this::newHeartbeatThread);
+        this.ownsClient = false;
+        this.ownsConnectionPool = ownsConnectionPool;
     }
-  }
 
-  /** 异步提交已消费位点。 */
-  public CompletableFuture<Void> commitAsync() {
-    ConsumerGroupSession session = requireGroupSession();
-    Map<TopicPartition, Long> offsets = consumedOffsetSnapshot();
-    List<CompletableFuture<Void>> futures = new ArrayList<>(offsets.size());
-    for (Map.Entry<TopicPartition, Long> entry : offsets.entrySet()) {
-      TopicPartition partition = entry.getKey();
-      futures.add(
-          commitOffset(
-              session.groupId(),
-              partition.topic(),
-              partition.partition(),
-              entry.getValue(),
-              options.offsetCommitMetadata()));
+    /** 订阅 topic 并启动消费组心跳。 */
+    public CompletableFuture<Void> subscribe(Collection<String> topics) {
+        return subscribe(options.groupId(), topics, ConsumerRebalanceListener.noop());
     }
-    return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
-  }
 
-  /** 同步提交已消费位点。 */
-  public void commitSync(Duration timeout) {
-    try {
-      commitAsync().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new IllegalStateException("commit interrupted", exception);
-    } catch (Exception exception) {
-      throw new IllegalStateException("commit failed", exception);
+    /** 使用指定 groupId 订阅 topic 并启动消费组心跳。 */
+    public CompletableFuture<Void> subscribe(String groupId, Collection<String> topics) {
+        return subscribe(groupId, topics, ConsumerRebalanceListener.noop());
     }
-  }
 
-  /** 返回当前分区分配。 */
-  public List<TopicPartition> assignment() {
-    return assignment;
-  }
-
-  /** 返回当前订阅 topic。 */
-  public Set<String> subscription() {
-    return subscribedTopics;
-  }
-
-  /** 刷新订阅分区并触发重平衡回调。 */
-  public CompletableFuture<Void> refreshAssignment() {
-    ensureOpen();
-    ConsumerGroupSession session = requireGroupSession();
-    Set<String> topics = subscribedTopics;
-    if (topics.isEmpty()) {
-      return CompletableFuture.completedFuture(null);
+    /** 订阅 topic 并注册重平衡监听器。 */
+    public CompletableFuture<Void> subscribe(
+            Collection<String> topics, ConsumerRebalanceListener listener) {
+        return subscribe(options.groupId(), topics, listener);
     }
-    return loadAssignmentAndOffsets(session.groupId(), topics, rebalanceListener);
-  }
 
-  /** 从指定分区和 offset 开始拉取。 */
-  public CompletableFuture<List<ConsumerRecord>> fetch(
-      String topic, int partition, long fetchOffset, int maxBytes) {
-    return AsyncRetrier.execute(
-        retryPolicy,
-        () -> fetchOnce(topic, partition, fetchOffset, maxBytes),
-        throwable -> isRetryable(topic, throwable));
-  }
+    /** 使用指定 groupId 订阅 topic 并注册重平衡监听器。 */
+    public CompletableFuture<Void> subscribe(
+            String groupId, Collection<String> topics, ConsumerRebalanceListener listener) {
+        ensureOpen();
+        if (metadataManager == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("subscribe requires metadata routing mode"));
+        }
+        Set<String> uniqueTopics = validateTopics(topics);
+        ConsumerRebalanceListener newListener =
+                listener == null ? ConsumerRebalanceListener.noop() : listener;
+        ConsumerSubscriptionPayload subscriptionPayload =
+                new ConsumerSubscriptionPayload(options.memberId(), uniqueTopics.stream().toList());
+        byte[] encodedSubscription =
+                ConsumerAssignmentPayloadCodec.encodeSubscription(subscriptionPayload);
+        ConsumerAssignmentPayloadCodec.decodeSubscription(encodedSubscription);
+        return joinGroup(groupId, options.memberId(), options.sessionTimeoutMs())
+                .thenCompose(
+                        session ->
+                                syncGroup(session)
+                                        .thenCompose(
+                                                ignored -> loadAssignmentAndOffsets(groupId, uniqueTopics, newListener))
+                                        .thenRun(
+                                                () -> {
+                                                    synchronized (stateLock) {
+                                                        subscribedTopics = uniqueTopics;
+                                                        rebalanceListener = newListener;
+                                                        groupSession = session;
+                                                    }
+                                                    startHeartbeatLoop(session);
+                                                }));
+    }
 
-  /** 提交消费位点。 */
-  public CompletableFuture<Void> commitOffset(
-      String groupId, String topic, int partition, long offset, String metadata) {
-    OffsetCommitRequestBody body =
-        new OffsetCommitRequestBody(
-            groupId,
-            List.of(
-                new OffsetCommitTopic(
-                    topic, List.of(new OffsetCommitPartition(partition, offset, metadata)))));
-    return sendToCoordinator(groupId, ApiKey.OFFSET_COMMIT, body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("offset commit", response);
-              OffsetCommitResponseBody responseBody = (OffsetCommitResponseBody) response.body();
-              OffsetCommitPartitionResponse partitionResponse =
-                  responseBody.topics().stream()
-                      .filter(value -> value.topic().equals(topic))
-                      .flatMap(value -> value.partitions().stream())
-                      .filter(value -> value.partition() == partition)
-                      .findFirst()
-                      .orElseThrow(
-                          () -> new IllegalStateException("missing offset commit response"));
-              if (partitionResponse.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "offset commit failed: " + partitionResponse.errorCode(),
+    /** 手动指定分区，不加入消费组。 */
+    public void assign(Collection<TopicPartition> partitions) {
+        ensureOpen();
+        if (partitions == null || partitions.isEmpty()) {
+            throw new IllegalArgumentException("partitions must not be empty");
+        }
+        List<TopicPartition> newAssignment = List.copyOf(partitions);
+        synchronized (stateLock) {
+            stopHeartbeatLoop();
+            groupSession = null;
+            rebalanceListener = ConsumerRebalanceListener.noop();
+            subscribedTopics = Set.of();
+            assignment = newAssignment;
+            nextOffsets.clear();
+            consumedOffsets.clear();
+            for (TopicPartition partition : newAssignment) {
+                nextOffsets.put(partition, 0L);
+            }
+        }
+    }
+
+    /** 拉取当前订阅或分配的消息。 */
+    public CompletableFuture<List<ConsumerRecord>> poll(Duration timeout) {
+        ensureOpen();
+        List<TopicPartition> assignedPartitions = assignment;
+        if (assignedPartitions.isEmpty()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        List<CompletableFuture<List<ConsumerRecord>>> futures =
+                new ArrayList<>(assignedPartitions.size());
+        for (TopicPartition partition : assignedPartitions) {
+            futures.add(
+                    fetch(
+                            partition.topic(),
+                            partition.partition(),
+                            nextOffset(partition),
+                            options.fetchMaxBytes()));
+        }
+        CompletableFuture<List<ConsumerRecord>> result =
+                CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                        .thenApply(
+                                ignored -> {
+                                    List<ConsumerRecord> records = new ArrayList<>();
+                                    for (CompletableFuture<List<ConsumerRecord>> future : futures) {
+                                        records.addAll(future.join());
+                                    }
+                                    updateConsumedOffsets(records);
+                                    return records;
+                                });
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            return result;
+        }
+        return result.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** 同步拉取当前订阅或分配的消息。 */
+    public List<ConsumerRecord> pollSync(Duration timeout) {
+        try {
+            return poll(timeout).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("poll interrupted", exception);
+        } catch (Exception exception) {
+            throw new IllegalStateException("poll failed", exception);
+        }
+    }
+
+    /** 异步提交已消费位点。 */
+    public CompletableFuture<Void> commitAsync() {
+        ConsumerGroupSession session = requireGroupSession();
+        Map<TopicPartition, Long> offsets = consumedOffsetSnapshot();
+        List<CompletableFuture<Void>> futures = new ArrayList<>(offsets.size());
+        for (Map.Entry<TopicPartition, Long> entry : offsets.entrySet()) {
+            TopicPartition partition = entry.getKey();
+            futures.add(
+                    commitOffset(
+                            session.groupId(),
+                            partition.topic(),
+                            partition.partition(),
+                            entry.getValue(),
+                            options.offsetCommitMetadata()));
+        }
+        return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
+    }
+
+    /** 同步提交已消费位点。 */
+    public void commitSync(Duration timeout) {
+        try {
+            commitAsync().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("commit interrupted", exception);
+        } catch (Exception exception) {
+            throw new IllegalStateException("commit failed", exception);
+        }
+    }
+
+    /** 返回当前分区分配。 */
+    public List<TopicPartition> assignment() {
+        return assignment;
+    }
+
+    /** 返回当前订阅 topic。 */
+    public Set<String> subscription() {
+        return subscribedTopics;
+    }
+
+    /** 刷新订阅分区并触发重平衡回调。 */
+    public CompletableFuture<Void> refreshAssignment() {
+        ensureOpen();
+        ConsumerGroupSession session = requireGroupSession();
+        Set<String> topics = subscribedTopics;
+        if (topics.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return loadAssignmentAndOffsets(session.groupId(), topics, rebalanceListener);
+    }
+
+    /** 从指定分区和 offset 开始拉取。 */
+    public CompletableFuture<List<ConsumerRecord>> fetch(
+            String topic, int partition, long fetchOffset, int maxBytes) {
+        return AsyncRetrier.execute(
+                retryPolicy,
+                () -> fetchOnce(topic, partition, fetchOffset, maxBytes),
+                throwable -> isRetryable(topic, throwable));
+    }
+
+    /** 提交消费位点。 */
+    public CompletableFuture<Void> commitOffset(
+            String groupId, String topic, int partition, long offset, String metadata) {
+        OffsetCommitRequestBody body =
+                new OffsetCommitRequestBody(
+                        groupId,
+                        List.of(
+                                new OffsetCommitTopic(
+                                        topic, List.of(new OffsetCommitPartition(partition, offset, metadata)))));
+        return sendToCoordinator(groupId, ApiKey.OFFSET_COMMIT, body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("offset commit", response);
+                            OffsetCommitResponseBody responseBody = (OffsetCommitResponseBody) response.body();
+                            OffsetCommitPartitionResponse partitionResponse =
+                                    responseBody.topics().stream()
+                                            .filter(value -> value.topic().equals(topic))
+                                            .flatMap(value -> value.partitions().stream())
+                                            .filter(value -> value.partition() == partition)
+                                            .findFirst()
+                                            .orElseThrow(
+                                                    () -> new IllegalStateException("missing offset commit response"));
+                            if (partitionResponse.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "offset commit failed: " + partitionResponse.errorCode(),
+                                        partitionResponse.errorCode());
+                            }
+                            observability.metrics().offsetCommitted(groupId, topic, partition);
+                            return null;
+                        });
+    }
+
+    /** 查询已提交消费位点。 */
+    public CompletableFuture<OffsetAndMetadata> fetchOffset(
+            String groupId, String topic, int partition) {
+        OffsetFetchRequestBody body =
+                new OffsetFetchRequestBody(
+                        groupId,
+                        List.of(new OffsetFetchTopic(topic, List.of(new OffsetFetchPartition(partition)))));
+        return sendToCoordinator(groupId, ApiKey.OFFSET_FETCH, body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("offset fetch", response);
+                            OffsetFetchResponseBody responseBody = (OffsetFetchResponseBody) response.body();
+                            OffsetFetchPartitionResponse partitionResponse =
+                                    responseBody.topics().stream()
+                                            .filter(value -> value.topic().equals(topic))
+                                            .flatMap(value -> value.partitions().stream())
+                                            .filter(value -> value.partition() == partition)
+                                            .findFirst()
+                                            .orElseThrow(
+                                                    () -> new IllegalStateException("missing offset fetch response"));
+                            if (partitionResponse.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "offset fetch failed: " + partitionResponse.errorCode(),
+                                        partitionResponse.errorCode());
+                            }
+                            return new OffsetAndMetadata(
+                                    partitionResponse.offset(), partitionResponse.metadata());
+                        });
+    }
+
+    /** 加入消费组。 */
+    public CompletableFuture<ConsumerGroupSession> joinGroup(
+            String groupId, String memberId, int sessionTimeoutMs) {
+        JoinGroupRequestBody body = new JoinGroupRequestBody(groupId, memberId, sessionTimeoutMs);
+        return sendToCoordinator(groupId, ApiKey.JOIN_GROUP, body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("join group", response);
+                            JoinGroupResponseBody responseBody = (JoinGroupResponseBody) response.body();
+                            if (responseBody.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "join group failed: " + responseBody.errorCode(), responseBody.errorCode());
+                            }
+                            observability.metrics().groupOperation(groupId, "join");
+                            return new ConsumerGroupSession(
+                                    groupId,
+                                    responseBody.generationId(),
+                                    responseBody.memberId(),
+                                    responseBody.leaderId());
+                        });
+    }
+
+    /** 同步消费组。 */
+    public CompletableFuture<Void> syncGroup(ConsumerGroupSession session) {
+        SyncGroupRequestBody body =
+                new SyncGroupRequestBody(session.groupId(), session.generationId(), session.memberId());
+        return sendToCoordinator(session.groupId(), ApiKey.SYNC_GROUP, body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("sync group", response);
+                            SyncGroupResponseBody responseBody = (SyncGroupResponseBody) response.body();
+                            if (responseBody.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "sync group failed: " + responseBody.errorCode(), responseBody.errorCode());
+                            }
+                            observability.metrics().groupOperation(session.groupId(), "sync");
+                            return null;
+                        });
+    }
+
+    /** 向消费组协调者发送心跳。 */
+    public CompletableFuture<Void> heartbeat(ConsumerGroupSession session) {
+        HeartbeatRequestBody body =
+                new HeartbeatRequestBody(session.groupId(), session.generationId(), session.memberId());
+        return sendToCoordinator(session.groupId(), ApiKey.HEARTBEAT, body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("heartbeat", response);
+                            HeartbeatResponseBody responseBody = (HeartbeatResponseBody) response.body();
+                            if (responseBody.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "heartbeat failed: " + responseBody.errorCode(), responseBody.errorCode());
+                            }
+                            observability.metrics().groupOperation(session.groupId(), "heartbeat");
+                            return null;
+                        });
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        stopHeartbeatLoop();
+        heartbeatExecutor.shutdownNow();
+        if (ownsClient) {
+            client.close();
+        }
+        if (ownsConnectionPool) {
+            connectionPool.close();
+        }
+    }
+
+    private CompletableFuture<List<ConsumerRecord>> fetchOnce(
+            String topic, int partition, long fetchOffset, int maxBytes) {
+        FetchRequestBody body = fetchRequest(topic, partition, fetchOffset, maxBytes);
+        if (metadataManager == null) {
+            return client
+                    .send(ApiKey.FETCH, ProtocolConstants.DEFAULT_API_VERSION, clientId, body)
+                    .thenApply(
+                            response ->
+                                    recordFetch(
+                                            topic, partition, toRecords(topic, partition, fetchOffset, response)));
+        }
+        return metadataManager
+                .route(topic, partition)
+                .thenCompose(route -> fetchFromLeader(route, topic, partition, fetchOffset, body));
+    }
+
+    private CompletableFuture<List<ConsumerRecord>> fetchFromLeader(
+            PartitionRoute route, String topic, int partition, long fetchOffset, FetchRequestBody body) {
+        return connectionPool
+                .send(
+                        route.leaderEndpoint(),
+                        ApiKey.FETCH,
+                        ProtocolConstants.DEFAULT_API_VERSION,
+                        clientId,
+                        body)
+                .thenApply(
+                        response ->
+                                recordFetch(topic, partition, toRecords(topic, partition, fetchOffset, response)));
+    }
+
+    private FetchRequestBody fetchRequest(
+            String topic, int partition, long fetchOffset, int maxBytes) {
+        return new FetchRequestBody(
+                -1,
+                500,
+                1,
+                maxBytes,
+                (byte) 0,
+                0,
+                List.of(
+                        new FetchTopicRequest(
+                                topic,
+                                List.of(new FetchPartitionRequest(partition, -1, fetchOffset, -1, maxBytes)))));
+    }
+
+    private CompletableFuture<ResponseMessage> sendToCoordinator(
+            String groupId, ApiKey apiKey, RequestBody body) {
+        if (metadataManager == null) {
+            return client.send(apiKey, ProtocolConstants.DEFAULT_API_VERSION, clientId, body);
+        }
+        return findCoordinator(groupId)
+                .thenCompose(
+                        endpoint ->
+                                connectionPool.send(
+                                        endpoint, apiKey, ProtocolConstants.DEFAULT_API_VERSION, clientId, body));
+    }
+
+    private CompletableFuture<BrokerEndpoint> findCoordinator(String groupId) {
+        FindCoordinatorRequestBody body =
+                new FindCoordinatorRequestBody(groupId, COORDINATOR_KEY_TYPE_GROUP);
+        return connectionPool
+                .send(
+                        metadataManager.bootstrapEndpoint(),
+                        ApiKey.FIND_COORDINATOR,
+                        ProtocolConstants.DEFAULT_API_VERSION,
+                        clientId,
+                        body)
+                .thenApply(
+                        response -> {
+                            assertTopLevelSuccess("find coordinator", response);
+                            FindCoordinatorResponseBody responseBody =
+                                    (FindCoordinatorResponseBody) response.body();
+                            if (responseBody.errorCode() != ErrorCode.NONE) {
+                                throw new StellflowClientException(
+                                        "find coordinator failed: " + responseBody.errorCode(),
+                                        responseBody.errorCode());
+                            }
+                            return new BrokerEndpoint(responseBody.host(), responseBody.port());
+                        });
+    }
+
+    private List<ConsumerRecord> toRecords(
+            String topic, int partition, long fetchOffset, ResponseMessage response) {
+        if (response.header().errorCode() != ErrorCode.NONE) {
+            throw new StellflowClientException(
+                    "fetch failed: " + response.header().errorCode(), response.header().errorCode());
+        }
+        FetchResponseBody body = (FetchResponseBody) response.body();
+        FetchPartitionResponse partitionResponse =
+                body.responses().stream()
+                        .filter(topicResponse -> topicResponse.topic().equals(topic))
+                        .flatMap(topicResponse -> topicResponse.partitions().stream())
+                        .filter(value -> value.partition() == partition)
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalStateException("missing fetch partition response"));
+        if (partitionResponse.errorCode() != ErrorCode.NONE) {
+            throw new StellflowClientException(
+                    "fetch partition failed: " + partitionResponse.errorCode(),
                     partitionResponse.errorCode());
-              }
-              observability.metrics().offsetCommitted(groupId, topic, partition);
-              return null;
-            });
-  }
-
-  /** 查询已提交消费位点。 */
-  public CompletableFuture<OffsetAndMetadata> fetchOffset(
-      String groupId, String topic, int partition) {
-    OffsetFetchRequestBody body =
-        new OffsetFetchRequestBody(
-            groupId,
-            List.of(new OffsetFetchTopic(topic, List.of(new OffsetFetchPartition(partition)))));
-    return sendToCoordinator(groupId, ApiKey.OFFSET_FETCH, body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("offset fetch", response);
-              OffsetFetchResponseBody responseBody = (OffsetFetchResponseBody) response.body();
-              OffsetFetchPartitionResponse partitionResponse =
-                  responseBody.topics().stream()
-                      .filter(value -> value.topic().equals(topic))
-                      .flatMap(value -> value.partitions().stream())
-                      .filter(value -> value.partition() == partition)
-                      .findFirst()
-                      .orElseThrow(
-                          () -> new IllegalStateException("missing offset fetch response"));
-              if (partitionResponse.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "offset fetch failed: " + partitionResponse.errorCode(),
-                    partitionResponse.errorCode());
-              }
-              return new OffsetAndMetadata(
-                  partitionResponse.offset(), partitionResponse.metadata());
-            });
-  }
-
-  /** 加入消费组。 */
-  public CompletableFuture<ConsumerGroupSession> joinGroup(
-      String groupId, String memberId, int sessionTimeoutMs) {
-    JoinGroupRequestBody body = new JoinGroupRequestBody(groupId, memberId, sessionTimeoutMs);
-    return sendToCoordinator(groupId, ApiKey.JOIN_GROUP, body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("join group", response);
-              JoinGroupResponseBody responseBody = (JoinGroupResponseBody) response.body();
-              if (responseBody.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "join group failed: " + responseBody.errorCode(), responseBody.errorCode());
-              }
-              observability.metrics().groupOperation(groupId, "join");
-              return new ConsumerGroupSession(
-                  groupId,
-                  responseBody.generationId(),
-                  responseBody.memberId(),
-                  responseBody.leaderId());
-            });
-  }
-
-  /** 同步消费组。 */
-  public CompletableFuture<Void> syncGroup(ConsumerGroupSession session) {
-    SyncGroupRequestBody body =
-        new SyncGroupRequestBody(session.groupId(), session.generationId(), session.memberId());
-    return sendToCoordinator(session.groupId(), ApiKey.SYNC_GROUP, body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("sync group", response);
-              SyncGroupResponseBody responseBody = (SyncGroupResponseBody) response.body();
-              if (responseBody.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "sync group failed: " + responseBody.errorCode(), responseBody.errorCode());
-              }
-              observability.metrics().groupOperation(session.groupId(), "sync");
-              return null;
-            });
-  }
-
-  /** 向消费组协调者发送心跳。 */
-  public CompletableFuture<Void> heartbeat(ConsumerGroupSession session) {
-    HeartbeatRequestBody body =
-        new HeartbeatRequestBody(session.groupId(), session.generationId(), session.memberId());
-    return sendToCoordinator(session.groupId(), ApiKey.HEARTBEAT, body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("heartbeat", response);
-              HeartbeatResponseBody responseBody = (HeartbeatResponseBody) response.body();
-              if (responseBody.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "heartbeat failed: " + responseBody.errorCode(), responseBody.errorCode());
-              }
-              observability.metrics().groupOperation(session.groupId(), "heartbeat");
-              return null;
-            });
-  }
-
-  @Override
-  public void close() {
-    if (!closed.compareAndSet(false, true)) {
-      return;
+        }
+        if (partitionResponse.records() == null || partitionResponse.records().length == 0) {
+            return List.of();
+        }
+        List<ConsumerRecord> records = new ArrayList<>();
+        for (RecordBatch batch : RecordBatchCodec.decodeBatchSet(partitionResponse.records())) {
+            for (StellflowRecord record : batch.records()) {
+                records.add(
+                        new ConsumerRecord(
+                                topic,
+                                partition,
+                                fetchOffset + batch.baseOffsetDelta() + record.offsetDelta(),
+                                record.key(),
+                                record.value(),
+                                batch.baseTimestamp() + record.timestampDelta()));
+            }
+        }
+        return records;
     }
-    stopHeartbeatLoop();
-    heartbeatExecutor.shutdownNow();
-    if (ownsClient) {
-      client.close();
-    }
-    if (ownsConnectionPool) {
-      connectionPool.close();
-    }
-  }
 
-  private CompletableFuture<List<ConsumerRecord>> fetchOnce(
-      String topic, int partition, long fetchOffset, int maxBytes) {
-    FetchRequestBody body = fetchRequest(topic, partition, fetchOffset, maxBytes);
-    if (metadataManager == null) {
-      return client
-          .send(ApiKey.FETCH, ProtocolConstants.DEFAULT_API_VERSION, clientId, body)
-          .thenApply(
-              response ->
-                  recordFetch(
-                      topic, partition, toRecords(topic, partition, fetchOffset, response)));
+    private CompletableFuture<Void> loadAssignmentAndOffsets(
+            String groupId, Set<String> uniqueTopics, ConsumerRebalanceListener listener) {
+        return metadataManager
+                .refresh(uniqueTopics)
+                .thenCompose(
+                        metadata -> {
+                            ConsumerAssignmentPayload assignmentPayload =
+                                    new ConsumerAssignmentPayload(partitionsFromMetadata(metadata.topics()));
+                            byte[] encodedAssignment =
+                                    ConsumerAssignmentPayloadCodec.encodeAssignment(assignmentPayload);
+                            List<TopicPartition> partitions =
+                                    ConsumerAssignmentPayloadCodec.decodeAssignment(encodedAssignment).partitions();
+                            List<CompletableFuture<OffsetState>> futures = new ArrayList<>(partitions.size());
+                            for (TopicPartition partition : partitions) {
+                                futures.add(
+                                        fetchOffset(groupId, partition.topic(), partition.partition())
+                                                .thenApply(
+                                                        offset -> new OffsetState(partition, Math.max(0, offset.offset()))));
+                            }
+                            return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
+                                    .thenRun(
+                                            () -> {
+                                                RebalanceChanges changes = rebalanceChanges(assignment, partitions);
+                                                if (!changes.revoked().isEmpty()) {
+                                                    listener.onPartitionsRevoked(changes.revoked());
+                                                }
+                                                synchronized (stateLock) {
+                                                    assignment = partitions;
+                                                    nextOffsets
+                                                            .keySet()
+                                                            .removeIf(partition -> !partitions.contains(partition));
+                                                    consumedOffsets
+                                                            .keySet()
+                                                            .removeIf(partition -> !partitions.contains(partition));
+                                                    for (CompletableFuture<OffsetState> future : futures) {
+                                                        OffsetState offset = future.join();
+                                                        if (!nextOffsets.containsKey(offset.partition())) {
+                                                            nextOffsets.put(offset.partition(), offset.offset());
+                                                        }
+                                                    }
+                                                }
+                                                if (!changes.assigned().isEmpty()) {
+                                                    listener.onPartitionsAssigned(changes.assigned());
+                                                }
+                                            });
+                        });
     }
-    return metadataManager
-        .route(topic, partition)
-        .thenCompose(route -> fetchFromLeader(route, topic, partition, fetchOffset, body));
-  }
 
-  private CompletableFuture<List<ConsumerRecord>> fetchFromLeader(
-      PartitionRoute route, String topic, int partition, long fetchOffset, FetchRequestBody body) {
-    return connectionPool
-        .send(
-            route.leaderEndpoint(),
-            ApiKey.FETCH,
-            ProtocolConstants.DEFAULT_API_VERSION,
-            clientId,
-            body)
-        .thenApply(
-            response ->
-                recordFetch(topic, partition, toRecords(topic, partition, fetchOffset, response)));
-  }
-
-  private FetchRequestBody fetchRequest(
-      String topic, int partition, long fetchOffset, int maxBytes) {
-    return new FetchRequestBody(
-        -1,
-        500,
-        1,
-        maxBytes,
-        (byte) 0,
-        0,
-        List.of(
-            new FetchTopicRequest(
-                topic,
-                List.of(new FetchPartitionRequest(partition, -1, fetchOffset, -1, maxBytes)))));
-  }
-
-  private CompletableFuture<ResponseMessage> sendToCoordinator(
-      String groupId, ApiKey apiKey, RequestBody body) {
-    if (metadataManager == null) {
-      return client.send(apiKey, ProtocolConstants.DEFAULT_API_VERSION, clientId, body);
+    private List<TopicPartition> partitionsFromMetadata(List<MetadataTopicResponse> topics) {
+        List<TopicPartition> partitions = new ArrayList<>();
+        for (MetadataTopicResponse topic : topics) {
+            if (topic.errorCode() != ErrorCode.NONE) {
+                continue;
+            }
+            for (MetadataPartitionResponse partition : topic.partitions()) {
+                if (partition.errorCode() == ErrorCode.NONE) {
+                    partitions.add(new TopicPartition(topic.topic(), partition.partition()));
+                }
+            }
+        }
+        return List.copyOf(partitions);
     }
-    return findCoordinator(groupId)
-        .thenCompose(
-            endpoint ->
-                connectionPool.send(
-                    endpoint, apiKey, ProtocolConstants.DEFAULT_API_VERSION, clientId, body));
-  }
 
-  private CompletableFuture<BrokerEndpoint> findCoordinator(String groupId) {
-    FindCoordinatorRequestBody body =
-        new FindCoordinatorRequestBody(groupId, COORDINATOR_KEY_TYPE_GROUP);
-    return connectionPool
-        .send(
-            metadataManager.bootstrapEndpoint(),
-            ApiKey.FIND_COORDINATOR,
-            ProtocolConstants.DEFAULT_API_VERSION,
-            clientId,
-            body)
-        .thenApply(
-            response -> {
-              assertTopLevelSuccess("find coordinator", response);
-              FindCoordinatorResponseBody responseBody =
-                  (FindCoordinatorResponseBody) response.body();
-              if (responseBody.errorCode() != ErrorCode.NONE) {
-                throw new StellflowClientException(
-                    "find coordinator failed: " + responseBody.errorCode(),
-                    responseBody.errorCode());
-              }
-              return new BrokerEndpoint(responseBody.host(), responseBody.port());
-            });
-  }
+    private void assertTopLevelSuccess(String operation, ResponseMessage response) {
+        if (response.header().errorCode() != ErrorCode.NONE) {
+            throw new StellflowClientException(
+                    operation + " failed: " + response.header().errorCode(), response.header().errorCode());
+        }
+    }
 
-  private List<ConsumerRecord> toRecords(
-      String topic, int partition, long fetchOffset, ResponseMessage response) {
-    if (response.header().errorCode() != ErrorCode.NONE) {
-      throw new StellflowClientException(
-          "fetch failed: " + response.header().errorCode(), response.header().errorCode());
+    private boolean isRetryable(String topic, Throwable throwable) {
+        if (metadataManager != null) {
+            metadataManager.invalidate(topic);
+        }
+        if (throwable instanceof StellflowClientException exception) {
+            return switch (exception.errorCode()) {
+                case BROKER_NOT_AVAILABLE,
+                        LEADER_NOT_AVAILABLE,
+                        NOT_LEADER_OR_FOLLOWER,
+                        UNKNOWN_TOPIC_OR_PARTITION ->
+                        true;
+                default -> false;
+            };
+        }
+        return true;
     }
-    FetchResponseBody body = (FetchResponseBody) response.body();
-    FetchPartitionResponse partitionResponse =
-        body.responses().stream()
-            .filter(topicResponse -> topicResponse.topic().equals(topic))
-            .flatMap(topicResponse -> topicResponse.partitions().stream())
-            .filter(value -> value.partition() == partition)
-            .findFirst()
-            .orElseThrow(() -> new IllegalStateException("missing fetch partition response"));
-    if (partitionResponse.errorCode() != ErrorCode.NONE) {
-      throw new StellflowClientException(
-          "fetch partition failed: " + partitionResponse.errorCode(),
-          partitionResponse.errorCode());
-    }
-    if (partitionResponse.records() == null || partitionResponse.records().length == 0) {
-      return List.of();
-    }
-    List<ConsumerRecord> records = new ArrayList<>();
-    for (RecordBatch batch : RecordBatchCodec.decodeBatchSet(partitionResponse.records())) {
-      for (StellflowRecord record : batch.records()) {
-        records.add(
-            new ConsumerRecord(
+
+    private List<ConsumerRecord> recordFetch(
+            String topic, int partition, List<ConsumerRecord> records) {
+        observability.metrics().recordsFetched(topic, partition, records.size());
+        LOGGER.log(
+                System.Logger.Level.DEBUG,
+                "Fetched Stellflow records topic={0}, partition={1}, count={2}",
                 topic,
                 partition,
-                fetchOffset + batch.baseOffsetDelta() + record.offsetDelta(),
-                record.key(),
-                record.value(),
-                batch.baseTimestamp() + record.timestampDelta()));
-      }
+                records.size());
+        return records;
     }
-    return records;
-  }
 
-  private CompletableFuture<Void> loadAssignmentAndOffsets(
-      String groupId, Set<String> uniqueTopics, ConsumerRebalanceListener listener) {
-    return metadataManager
-        .refresh(uniqueTopics)
-        .thenCompose(
-            metadata -> {
-              ConsumerAssignmentPayload assignmentPayload =
-                  new ConsumerAssignmentPayload(partitionsFromMetadata(metadata.topics()));
-              byte[] encodedAssignment =
-                  ConsumerAssignmentPayloadCodec.encodeAssignment(assignmentPayload);
-              List<TopicPartition> partitions =
-                  ConsumerAssignmentPayloadCodec.decodeAssignment(encodedAssignment).partitions();
-              List<CompletableFuture<OffsetState>> futures = new ArrayList<>(partitions.size());
-              for (TopicPartition partition : partitions) {
-                futures.add(
-                    fetchOffset(groupId, partition.topic(), partition.partition())
-                        .thenApply(
-                            offset -> new OffsetState(partition, Math.max(0, offset.offset()))));
-              }
-              return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
-                  .thenRun(
-                      () -> {
-                        RebalanceChanges changes = rebalanceChanges(assignment, partitions);
-                        if (!changes.revoked().isEmpty()) {
-                          listener.onPartitionsRevoked(changes.revoked());
-                        }
-                        synchronized (stateLock) {
-                          assignment = partitions;
-                          nextOffsets
-                              .keySet()
-                              .removeIf(partition -> !partitions.contains(partition));
-                          consumedOffsets
-                              .keySet()
-                              .removeIf(partition -> !partitions.contains(partition));
-                          for (CompletableFuture<OffsetState> future : futures) {
-                            OffsetState offset = future.join();
-                            if (!nextOffsets.containsKey(offset.partition())) {
-                              nextOffsets.put(offset.partition(), offset.offset());
-                            }
-                          }
-                        }
-                        if (!changes.assigned().isEmpty()) {
-                          listener.onPartitionsAssigned(changes.assigned());
-                        }
-                      });
-            });
-  }
-
-  private List<TopicPartition> partitionsFromMetadata(List<MetadataTopicResponse> topics) {
-    List<TopicPartition> partitions = new ArrayList<>();
-    for (MetadataTopicResponse topic : topics) {
-      if (topic.errorCode() != ErrorCode.NONE) {
-        continue;
-      }
-      for (MetadataPartitionResponse partition : topic.partitions()) {
-        if (partition.errorCode() == ErrorCode.NONE) {
-          partitions.add(new TopicPartition(topic.topic(), partition.partition()));
+    private long nextOffset(TopicPartition partition) {
+        synchronized (stateLock) {
+            return nextOffsets.getOrDefault(partition, 0L);
         }
-      }
     }
-    return List.copyOf(partitions);
-  }
 
-  private void assertTopLevelSuccess(String operation, ResponseMessage response) {
-    if (response.header().errorCode() != ErrorCode.NONE) {
-      throw new StellflowClientException(
-          operation + " failed: " + response.header().errorCode(), response.header().errorCode());
+    private void updateConsumedOffsets(List<ConsumerRecord> records) {
+        synchronized (stateLock) {
+            for (ConsumerRecord record : records) {
+                TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                long nextOffset = record.offset() + 1;
+                nextOffsets.merge(partition, nextOffset, Math::max);
+                consumedOffsets.merge(partition, nextOffset, Math::max);
+            }
+        }
     }
-  }
 
-  private boolean isRetryable(String topic, Throwable throwable) {
-    if (metadataManager != null) {
-      metadataManager.invalidate(topic);
+    private Map<TopicPartition, Long> consumedOffsetSnapshot() {
+        synchronized (stateLock) {
+            return Map.copyOf(consumedOffsets);
+        }
     }
-    if (throwable instanceof StellflowClientException exception) {
-      return switch (exception.errorCode()) {
-        case BROKER_NOT_AVAILABLE,
-            LEADER_NOT_AVAILABLE,
-            NOT_LEADER_OR_FOLLOWER,
-            UNKNOWN_TOPIC_OR_PARTITION ->
-            true;
-        default -> false;
-      };
+
+    private ConsumerGroupSession requireGroupSession() {
+        ConsumerGroupSession session = groupSession;
+        if (session == null) {
+            throw new IllegalStateException("consumer has not joined a group");
+        }
+        return session;
     }
-    return true;
-  }
 
-  private List<ConsumerRecord> recordFetch(
-      String topic, int partition, List<ConsumerRecord> records) {
-    observability.metrics().recordsFetched(topic, partition, records.size());
-    LOGGER.log(
-        System.Logger.Level.DEBUG,
-        "Fetched Stellflow records topic={0}, partition={1}, count={2}",
-        topic,
-        partition,
-        records.size());
-    return records;
-  }
-
-  private long nextOffset(TopicPartition partition) {
-    synchronized (stateLock) {
-      return nextOffsets.getOrDefault(partition, 0L);
+    private void startHeartbeatLoop(ConsumerGroupSession session) {
+        synchronized (stateLock) {
+            stopHeartbeatLoop();
+            long intervalMs = options.heartbeatInterval().toMillis();
+            heartbeatTask =
+                    heartbeatExecutor.scheduleAtFixedRate(
+                            () -> sendHeartbeatSafely(session), intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        }
     }
-  }
 
-  private void updateConsumedOffsets(List<ConsumerRecord> records) {
-    synchronized (stateLock) {
-      for (ConsumerRecord record : records) {
-        TopicPartition partition = new TopicPartition(record.topic(), record.partition());
-        long nextOffset = record.offset() + 1;
-        nextOffsets.merge(partition, nextOffset, Math::max);
-        consumedOffsets.merge(partition, nextOffset, Math::max);
-      }
+    private void stopHeartbeatLoop() {
+        ScheduledFuture<?> task = heartbeatTask;
+        if (task != null) {
+            task.cancel(false);
+            heartbeatTask = null;
+        }
     }
-  }
 
-  private Map<TopicPartition, Long> consumedOffsetSnapshot() {
-    synchronized (stateLock) {
-      return Map.copyOf(consumedOffsets);
+    private void sendHeartbeatSafely(ConsumerGroupSession session) {
+        if (closed.get() || groupSession != session) {
+            return;
+        }
+        heartbeat(session)
+                .exceptionally(
+                        throwable -> {
+                            LOGGER.log(
+                                    System.Logger.Level.WARNING,
+                                    "Failed Stellflow heartbeat groupId=" + session.groupId(),
+                                    throwable);
+                            return null;
+                        });
     }
-  }
 
-  private ConsumerGroupSession requireGroupSession() {
-    ConsumerGroupSession session = groupSession;
-    if (session == null) {
-      throw new IllegalStateException("consumer has not joined a group");
+    private Thread newHeartbeatThread(Runnable runnable) {
+        Thread thread = new Thread(runnable, "stellflow-consumer-heartbeat-" + clientId);
+        thread.setDaemon(true);
+        return thread;
     }
-    return session;
-  }
 
-  private void startHeartbeatLoop(ConsumerGroupSession session) {
-    synchronized (stateLock) {
-      stopHeartbeatLoop();
-      long intervalMs = options.heartbeatInterval().toMillis();
-      heartbeatTask =
-          heartbeatExecutor.scheduleAtFixedRate(
-              () -> sendHeartbeatSafely(session), intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+    private Set<String> validateTopics(Collection<String> topics) {
+        if (topics == null || topics.isEmpty()) {
+            throw new IllegalArgumentException("topics must not be empty");
+        }
+        Set<String> uniqueTopics = new LinkedHashSet<>();
+        for (String topic : topics) {
+            if (topic == null || topic.isBlank()) {
+                throw new IllegalArgumentException("topic must not be blank");
+            }
+            uniqueTopics.add(topic);
+        }
+        return Set.copyOf(uniqueTopics);
     }
-  }
 
-  private void stopHeartbeatLoop() {
-    ScheduledFuture<?> task = heartbeatTask;
-    if (task != null) {
-      task.cancel(false);
-      heartbeatTask = null;
+    private void ensureOpen() {
+        if (closed.get()) {
+            throw new IllegalStateException("consumer is closed");
+        }
     }
-  }
 
-  private void sendHeartbeatSafely(ConsumerGroupSession session) {
-    if (closed.get() || groupSession != session) {
-      return;
+    private RebalanceChanges rebalanceChanges(
+            List<TopicPartition> previousAssignment, List<TopicPartition> nextAssignment) {
+        List<TopicPartition> revoked =
+                previousAssignment.stream()
+                        .filter(partition -> !nextAssignment.contains(partition))
+                        .toList();
+        List<TopicPartition> assigned =
+                nextAssignment.stream()
+                        .filter(partition -> !previousAssignment.contains(partition))
+                        .toList();
+        return new RebalanceChanges(revoked, assigned);
     }
-    heartbeat(session)
-        .exceptionally(
-            throwable -> {
-              LOGGER.log(
-                  System.Logger.Level.WARNING,
-                  "Failed Stellflow heartbeat groupId=" + session.groupId(),
-                  throwable);
-              return null;
-            });
-  }
 
-  private Thread newHeartbeatThread(Runnable runnable) {
-    Thread thread = new Thread(runnable, "stellflow-consumer-heartbeat-" + clientId);
-    thread.setDaemon(true);
-    return thread;
-  }
+    private record RebalanceChanges(List<TopicPartition> revoked, List<TopicPartition> assigned) {}
 
-  private Set<String> validateTopics(Collection<String> topics) {
-    if (topics == null || topics.isEmpty()) {
-      throw new IllegalArgumentException("topics must not be empty");
-    }
-    Set<String> uniqueTopics = new LinkedHashSet<>();
-    for (String topic : topics) {
-      if (topic == null || topic.isBlank()) {
-        throw new IllegalArgumentException("topic must not be blank");
-      }
-      uniqueTopics.add(topic);
-    }
-    return Set.copyOf(uniqueTopics);
-  }
-
-  private void ensureOpen() {
-    if (closed.get()) {
-      throw new IllegalStateException("consumer is closed");
-    }
-  }
-
-  private RebalanceChanges rebalanceChanges(
-      List<TopicPartition> previousAssignment, List<TopicPartition> nextAssignment) {
-    List<TopicPartition> revoked =
-        previousAssignment.stream()
-            .filter(partition -> !nextAssignment.contains(partition))
-            .toList();
-    List<TopicPartition> assigned =
-        nextAssignment.stream()
-            .filter(partition -> !previousAssignment.contains(partition))
-            .toList();
-    return new RebalanceChanges(revoked, assigned);
-  }
-
-  private record RebalanceChanges(List<TopicPartition> revoked, List<TopicPartition> assigned) {}
-
-  private record OffsetState(TopicPartition partition, long offset) {}
+    private record OffsetState(TopicPartition partition, long offset) {}
 }

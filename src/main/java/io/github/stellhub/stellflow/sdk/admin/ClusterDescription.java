@@ -5,12 +5,12 @@ import java.util.List;
 
 /** 集群描述结果。 */
 public record ClusterDescription(
-    String clusterId,
-    int controllerId,
-    List<MetadataBroker> brokers,
-    int clusterAuthorizedOperations) {
+        String clusterId,
+        int controllerId,
+        List<MetadataBroker> brokers,
+        int clusterAuthorizedOperations) {
 
-  public ClusterDescription {
-    brokers = List.copyOf(brokers);
-  }
+    public ClusterDescription {
+        brokers = List.copyOf(brokers);
+    }
 }

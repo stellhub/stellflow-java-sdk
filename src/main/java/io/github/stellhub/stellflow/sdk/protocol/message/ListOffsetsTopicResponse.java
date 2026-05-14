@@ -4,4 +4,4 @@ import java.util.List;
 
 /** ListOffsets topic 响应。 */
 public record ListOffsetsTopicResponse(
-    String topic, List<ListOffsetsPartitionResponse> partitions) {}
+        String topic, List<ListOffsetsPartitionResponse> partitions) {}

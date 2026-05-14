@@ -25,57 +25,57 @@ import org.junit.jupiter.api.Test;
 @Disabled("Requires a local Stellflow broker. Enable manually for local debugging only.")
 class LocalStellflowServerDisabledTest {
 
-  private static final String ENDPOINT_PROPERTY = "stellflow.test.endpoint";
-  private static final String TOPIC_PROPERTY = "stellflow.test.topic";
-  private static final String PARTITION_PROPERTY = "stellflow.test.partition";
+    private static final String ENDPOINT_PROPERTY = "stellflow.test.endpoint";
+    private static final String TOPIC_PROPERTY = "stellflow.test.topic";
+    private static final String PARTITION_PROPERTY = "stellflow.test.partition";
 
-  @Test
-  void shouldConnectLocalBrokerAndFetchApiVersions() throws Exception {
-    try (NettyStellflowClient client = connectClient()) {
-      ApiVersionsResponseBody body =
-          (ApiVersionsResponseBody)
-              client
-                  .send(
-                      ApiKey.API_VERSIONS,
-                      ProtocolConstants.DEFAULT_API_VERSION,
-                      "stellflow-sdk-local-debug",
-                      new ApiVersionsRequestBody(
-                          "stellflow-java-sdk", "0.0.1", List.of("local.debug")))
-                  .get(10, TimeUnit.SECONDS)
-                  .body();
+    @Test
+    void shouldConnectLocalBrokerAndFetchApiVersions() throws Exception {
+        try (NettyStellflowClient client = connectClient()) {
+            ApiVersionsResponseBody body =
+                    (ApiVersionsResponseBody)
+                            client
+                                    .send(
+                                            ApiKey.API_VERSIONS,
+                                            ProtocolConstants.DEFAULT_API_VERSION,
+                                            "stellflow-sdk-local-debug",
+                                            new ApiVersionsRequestBody(
+                                                    "stellflow-java-sdk", "0.0.1", List.of("local.debug")))
+                                    .get(10, TimeUnit.SECONDS)
+                                    .body();
 
-      assertFalse(body.apiVersions().isEmpty());
+            assertFalse(body.apiVersions().isEmpty());
+        }
     }
-  }
 
-  @Test
-  void shouldProduceAndFetchAgainstLocalBroker() throws Exception {
-    String topic = System.getProperty(TOPIC_PROPERTY, "sdk-local-debug");
-    int partition = Integer.getInteger(PARTITION_PROPERTY, 0);
-    byte[] key = ("local-key-" + Instant.now().toEpochMilli()).getBytes(StandardCharsets.UTF_8);
-    byte[] value = ("local-value-" + Instant.now().toEpochMilli()).getBytes(StandardCharsets.UTF_8);
+    @Test
+    void shouldProduceAndFetchAgainstLocalBroker() throws Exception {
+        String topic = System.getProperty(TOPIC_PROPERTY, "sdk-local-debug");
+        int partition = Integer.getInteger(PARTITION_PROPERTY, 0);
+        byte[] key = ("local-key-" + Instant.now().toEpochMilli()).getBytes(StandardCharsets.UTF_8);
+        byte[] value = ("local-value-" + Instant.now().toEpochMilli()).getBytes(StandardCharsets.UTF_8);
 
-    try (NettyStellflowClient client = connectClient()) {
-      StellflowProducer producer = new StellflowProducer(client, "stellflow-sdk-local-producer");
-      StellflowConsumer consumer = new StellflowConsumer(client, "stellflow-sdk-local-consumer");
+        try (NettyStellflowClient client = connectClient()) {
+            StellflowProducer producer = new StellflowProducer(client, "stellflow-sdk-local-producer");
+            StellflowConsumer consumer = new StellflowConsumer(client, "stellflow-sdk-local-consumer");
 
-      RecordMetadata metadata =
-          producer.send(new ProducerRecord(topic, partition, key, value)).get(10, TimeUnit.SECONDS);
-      List<ConsumerRecord> records =
-          consumer
-              .fetch(topic, partition, metadata.baseOffset(), 1024 * 1024)
-              .get(10, TimeUnit.SECONDS);
+            RecordMetadata metadata =
+                    producer.send(new ProducerRecord(topic, partition, key, value)).get(10, TimeUnit.SECONDS);
+            List<ConsumerRecord> records =
+                    consumer
+                            .fetch(topic, partition, metadata.baseOffset(), 1024 * 1024)
+                            .get(10, TimeUnit.SECONDS);
 
-      assertFalse(records.isEmpty());
-      assertEquals(metadata.baseOffset(), records.getFirst().offset());
+            assertFalse(records.isEmpty());
+            assertEquals(metadata.baseOffset(), records.getFirst().offset());
+        }
     }
-  }
 
-  private NettyStellflowClient connectClient() throws Exception {
-    BrokerEndpoint endpoint =
-        BrokerEndpoint.parse(System.getProperty(ENDPOINT_PROPERTY, "127.0.0.1:9092"));
-    NettyStellflowClient client = new NettyStellflowClient(endpoint);
-    client.connect().get(10, TimeUnit.SECONDS);
-    return client;
-  }
+    private NettyStellflowClient connectClient() throws Exception {
+        BrokerEndpoint endpoint =
+                BrokerEndpoint.parse(System.getProperty(ENDPOINT_PROPERTY, "127.0.0.1:9092"));
+        NettyStellflowClient client = new NettyStellflowClient(endpoint);
+        client.connect().get(10, TimeUnit.SECONDS);
+        return client;
+    }
 }

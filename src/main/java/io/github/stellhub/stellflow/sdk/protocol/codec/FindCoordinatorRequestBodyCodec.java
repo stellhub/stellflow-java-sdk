@@ -5,26 +5,26 @@ import io.github.stellhub.stellflow.sdk.protocol.message.FindCoordinatorRequestB
 
 /** FindCoordinator 请求体编码器。 */
 public class FindCoordinatorRequestBodyCodec
-    implements RequestBodyCodec<FindCoordinatorRequestBody> {
+        implements RequestBodyCodec<FindCoordinatorRequestBody> {
 
-  @Override
-  public ApiKey apiKey() {
-    return ApiKey.FIND_COORDINATOR;
-  }
+    @Override
+    public ApiKey apiKey() {
+        return ApiKey.FIND_COORDINATOR;
+    }
 
-  @Override
-  public short apiVersion() {
-    return 0;
-  }
+    @Override
+    public short apiVersion() {
+        return 0;
+    }
 
-  @Override
-  public Class<FindCoordinatorRequestBody> bodyType() {
-    return FindCoordinatorRequestBody.class;
-  }
+    @Override
+    public Class<FindCoordinatorRequestBody> bodyType() {
+        return FindCoordinatorRequestBody.class;
+    }
 
-  @Override
-  public void encode(FindCoordinatorRequestBody body, BinaryWriter writer) {
-    writer.writeNullableString(body.key());
-    writer.writeByte(body.keyType());
-  }
+    @Override
+    public void encode(FindCoordinatorRequestBody body, BinaryWriter writer) {
+        writer.writeNullableString(body.key());
+        writer.writeByte(body.keyType());
+    }
 }

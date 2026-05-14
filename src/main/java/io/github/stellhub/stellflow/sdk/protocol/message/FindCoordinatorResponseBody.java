@@ -5,4 +5,4 @@ import io.github.stellhub.stellflow.sdk.protocol.ResponseBody;
 
 /** FindCoordinator 响应体。 */
 public record FindCoordinatorResponseBody(ErrorCode errorCode, int nodeId, String host, int port)
-    implements ResponseBody {}
+        implements ResponseBody {}

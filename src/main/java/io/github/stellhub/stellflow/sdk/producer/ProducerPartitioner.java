@@ -6,6 +6,6 @@ import java.util.List;
 @FunctionalInterface
 public interface ProducerPartitioner {
 
-  /** 选择目标分区。 */
-  int partition(String topic, byte[] key, byte[] value, List<Integer> partitions);
+    /** 选择目标分区。 */
+    int partition(String topic, byte[] key, byte[] value, List<Integer> partitions);
 }

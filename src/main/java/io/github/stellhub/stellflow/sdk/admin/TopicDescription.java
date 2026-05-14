@@ -5,13 +5,13 @@ import java.util.List;
 
 /** Topic 描述结果。 */
 public record TopicDescription(
-    String topic,
-    ErrorCode errorCode,
-    boolean internal,
-    List<PartitionDescription> partitions,
-    int topicAuthorizedOperations) {
+        String topic,
+        ErrorCode errorCode,
+        boolean internal,
+        List<PartitionDescription> partitions,
+        int topicAuthorizedOperations) {
 
-  public TopicDescription {
-    partitions = List.copyOf(partitions);
-  }
+    public TopicDescription {
+        partitions = List.copyOf(partitions);
+    }
 }
