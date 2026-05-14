@@ -82,6 +82,7 @@ public class StellflowConsumer implements AutoCloseable {
 
   private volatile Set<String> subscribedTopics = Set.of();
   private volatile List<TopicPartition> assignment = List.of();
+  private volatile ConsumerRebalanceListener rebalanceListener = ConsumerRebalanceListener.noop();
   private volatile ConsumerGroupSession groupSession;
   private volatile ScheduledFuture<?> heartbeatTask;
 
@@ -174,26 +175,47 @@ public class StellflowConsumer implements AutoCloseable {
 
   /** 订阅 topic 并启动消费组心跳。 */
   public CompletableFuture<Void> subscribe(Collection<String> topics) {
-    return subscribe(options.groupId(), topics);
+    return subscribe(options.groupId(), topics, ConsumerRebalanceListener.noop());
   }
 
   /** 使用指定 groupId 订阅 topic 并启动消费组心跳。 */
   public CompletableFuture<Void> subscribe(String groupId, Collection<String> topics) {
+    return subscribe(groupId, topics, ConsumerRebalanceListener.noop());
+  }
+
+  /** 订阅 topic 并注册重平衡监听器。 */
+  public CompletableFuture<Void> subscribe(
+      Collection<String> topics, ConsumerRebalanceListener listener) {
+    return subscribe(options.groupId(), topics, listener);
+  }
+
+  /** 使用指定 groupId 订阅 topic 并注册重平衡监听器。 */
+  public CompletableFuture<Void> subscribe(
+      String groupId, Collection<String> topics, ConsumerRebalanceListener listener) {
     ensureOpen();
     if (metadataManager == null) {
       return CompletableFuture.failedFuture(
           new IllegalStateException("subscribe requires metadata routing mode"));
     }
     Set<String> uniqueTopics = validateTopics(topics);
+    ConsumerRebalanceListener newListener =
+        listener == null ? ConsumerRebalanceListener.noop() : listener;
+    ConsumerSubscriptionPayload subscriptionPayload =
+        new ConsumerSubscriptionPayload(options.memberId(), uniqueTopics.stream().toList());
+    byte[] encodedSubscription =
+        ConsumerAssignmentPayloadCodec.encodeSubscription(subscriptionPayload);
+    ConsumerAssignmentPayloadCodec.decodeSubscription(encodedSubscription);
     return joinGroup(groupId, options.memberId(), options.sessionTimeoutMs())
         .thenCompose(
             session ->
                 syncGroup(session)
-                    .thenCompose(ignored -> loadAssignmentAndOffsets(groupId, uniqueTopics))
+                    .thenCompose(
+                        ignored -> loadAssignmentAndOffsets(groupId, uniqueTopics, newListener))
                     .thenRun(
                         () -> {
                           synchronized (stateLock) {
                             subscribedTopics = uniqueTopics;
+                            rebalanceListener = newListener;
                             groupSession = session;
                           }
                           startHeartbeatLoop(session);
@@ -210,6 +232,7 @@ public class StellflowConsumer implements AutoCloseable {
     synchronized (stateLock) {
       stopHeartbeatLoop();
       groupSession = null;
+      rebalanceListener = ConsumerRebalanceListener.noop();
       subscribedTopics = Set.of();
       assignment = newAssignment;
       nextOffsets.clear();
@@ -304,6 +327,17 @@ public class StellflowConsumer implements AutoCloseable {
   /** 返回当前订阅 topic。 */
   public Set<String> subscription() {
     return subscribedTopics;
+  }
+
+  /** 刷新订阅分区并触发重平衡回调。 */
+  public CompletableFuture<Void> refreshAssignment() {
+    ensureOpen();
+    ConsumerGroupSession session = requireGroupSession();
+    Set<String> topics = subscribedTopics;
+    if (topics.isEmpty()) {
+      return CompletableFuture.completedFuture(null);
+    }
+    return loadAssignmentAndOffsets(session.groupId(), topics, rebalanceListener);
   }
 
   /** 从指定分区和 offset 开始拉取。 */
@@ -570,12 +604,17 @@ public class StellflowConsumer implements AutoCloseable {
   }
 
   private CompletableFuture<Void> loadAssignmentAndOffsets(
-      String groupId, Set<String> uniqueTopics) {
+      String groupId, Set<String> uniqueTopics, ConsumerRebalanceListener listener) {
     return metadataManager
         .refresh(uniqueTopics)
         .thenCompose(
             metadata -> {
-              List<TopicPartition> partitions = partitionsFromMetadata(metadata.topics());
+              ConsumerAssignmentPayload assignmentPayload =
+                  new ConsumerAssignmentPayload(partitionsFromMetadata(metadata.topics()));
+              byte[] encodedAssignment =
+                  ConsumerAssignmentPayloadCodec.encodeAssignment(assignmentPayload);
+              List<TopicPartition> partitions =
+                  ConsumerAssignmentPayloadCodec.decodeAssignment(encodedAssignment).partitions();
               List<CompletableFuture<OffsetState>> futures = new ArrayList<>(partitions.size());
               for (TopicPartition partition : partitions) {
                 futures.add(
@@ -586,14 +625,27 @@ public class StellflowConsumer implements AutoCloseable {
               return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
                   .thenRun(
                       () -> {
+                        RebalanceChanges changes = rebalanceChanges(assignment, partitions);
+                        if (!changes.revoked().isEmpty()) {
+                          listener.onPartitionsRevoked(changes.revoked());
+                        }
                         synchronized (stateLock) {
                           assignment = partitions;
-                          nextOffsets.clear();
-                          consumedOffsets.clear();
+                          nextOffsets
+                              .keySet()
+                              .removeIf(partition -> !partitions.contains(partition));
+                          consumedOffsets
+                              .keySet()
+                              .removeIf(partition -> !partitions.contains(partition));
                           for (CompletableFuture<OffsetState> future : futures) {
                             OffsetState offset = future.join();
-                            nextOffsets.put(offset.partition(), offset.offset());
+                            if (!nextOffsets.containsKey(offset.partition())) {
+                              nextOffsets.put(offset.partition(), offset.offset());
+                            }
                           }
+                        }
+                        if (!changes.assigned().isEmpty()) {
+                          listener.onPartitionsAssigned(changes.assigned());
                         }
                       });
             });
@@ -739,6 +791,21 @@ public class StellflowConsumer implements AutoCloseable {
       throw new IllegalStateException("consumer is closed");
     }
   }
+
+  private RebalanceChanges rebalanceChanges(
+      List<TopicPartition> previousAssignment, List<TopicPartition> nextAssignment) {
+    List<TopicPartition> revoked =
+        previousAssignment.stream()
+            .filter(partition -> !nextAssignment.contains(partition))
+            .toList();
+    List<TopicPartition> assigned =
+        nextAssignment.stream()
+            .filter(partition -> !previousAssignment.contains(partition))
+            .toList();
+    return new RebalanceChanges(revoked, assigned);
+  }
+
+  private record RebalanceChanges(List<TopicPartition> revoked, List<TopicPartition> assigned) {}
 
   private record OffsetState(TopicPartition partition, long offset) {}
 }

@@ -7,6 +7,7 @@ import io.github.stellhub.stellflow.sdk.client.RetryPolicy;
 import io.github.stellhub.stellflow.sdk.client.StellflowClientFactory;
 import io.github.stellhub.stellflow.sdk.client.StellflowClientOptions;
 import io.github.stellhub.stellflow.sdk.consumer.ConsumerGroupSession;
+import io.github.stellhub.stellflow.sdk.consumer.ConsumerRebalanceListener;
 import io.github.stellhub.stellflow.sdk.consumer.ConsumerRecord;
 import io.github.stellhub.stellflow.sdk.consumer.OffsetAndMetadata;
 import io.github.stellhub.stellflow.sdk.consumer.StellflowConsumer;
@@ -210,6 +211,93 @@ class StellflowProducerConsumerIntegrationTest {
               .offset());
 
       Thread.sleep(150);
+      consumer.close();
+    }
+  }
+
+  @Test
+  void shouldNotifyRebalanceWhenSubscriptionAssignmentChanges() throws Exception {
+    int port = findFreePort();
+    BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
+    try (MiniBroker broker = MiniBroker.start(port);
+        StellflowConnectionPool pool = new StellflowConnectionPool()) {
+      MetadataManager metadataManager =
+          new MetadataManager(pool, List.of(endpoint), "stellflow-sdk-it-rebalance-metadata");
+      StellflowProducer producer =
+          new StellflowProducer(pool, metadataManager, "stellflow-sdk-it-rebalance-producer");
+      StellflowConsumerOptions options =
+          new StellflowConsumerOptions(
+              "rebalance-group", "", 30_000, Duration.ofMillis(50), 1024 * 1024, "rebalance");
+      StellflowConsumer consumer =
+          new StellflowConsumer(
+              pool,
+              metadataManager,
+              "stellflow-sdk-it-rebalance-consumer",
+              options,
+              RetryPolicy.defaultPolicy(),
+              false);
+      List<TopicPartition> revoked = new ArrayList<>();
+      List<TopicPartition> assigned = new ArrayList<>();
+      ConsumerRebalanceListener listener =
+          new ConsumerRebalanceListener() {
+            @Override
+            public void onPartitionsRevoked(java.util.Collection<TopicPartition> partitions) {
+              revoked.addAll(partitions);
+            }
+
+            @Override
+            public void onPartitionsAssigned(java.util.Collection<TopicPartition> partitions) {
+              assigned.addAll(partitions);
+            }
+          };
+
+      producer
+          .send(
+              new ProducerRecord(
+                  "orders",
+                  0,
+                  "rebalance-order".getBytes(StandardCharsets.UTF_8),
+                  "value".getBytes(StandardCharsets.UTF_8)))
+          .get(10, TimeUnit.SECONDS);
+      consumer.subscribe(List.of("orders"), listener).get(10, TimeUnit.SECONDS);
+
+      assertEquals(
+          List.of(new TopicPartition("orders", 0), new TopicPartition("orders", 1)), assigned);
+      assertEquals(List.of(), revoked);
+
+      producer
+          .send(
+              new ProducerRecord(
+                  "payments",
+                  0,
+                  "rebalance-payment".getBytes(StandardCharsets.UTF_8),
+                  "value".getBytes(StandardCharsets.UTF_8)))
+          .get(10, TimeUnit.SECONDS);
+      consumer.subscribe(List.of("payments"), listener).get(10, TimeUnit.SECONDS);
+
+      assertEquals(
+          List.of(new TopicPartition("orders", 0), new TopicPartition("orders", 1)), revoked);
+      assertEquals(
+          List.of(
+              new TopicPartition("orders", 0),
+              new TopicPartition("orders", 1),
+              new TopicPartition("payments", 0),
+              new TopicPartition("payments", 1)),
+          assigned);
+      assertEquals(
+          List.of(new TopicPartition("payments", 0), new TopicPartition("payments", 1)),
+          consumer.assignment());
+
+      List<ConsumerRecord> records = consumer.poll(Duration.ofSeconds(5)).get(10, TimeUnit.SECONDS);
+      assertEquals(1, records.size());
+      assertEquals("payments", records.getFirst().topic());
+      consumer.commitAsync().get(10, TimeUnit.SECONDS);
+      assertEquals(
+          1L,
+          consumer
+              .fetchOffset("rebalance-group", "payments", 0)
+              .get(10, TimeUnit.SECONDS)
+              .offset());
       consumer.close();
     }
   }

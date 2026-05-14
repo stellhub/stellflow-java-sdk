@@ -309,12 +309,13 @@ Fetch 请求关键字段：
 当前 Consumer 高层封装已经提供：
 
 - `subscribe(topics)`：基于 `Metadata` 发现订阅 topic 的分区，执行 `JoinGroup` / `SyncGroup`，并启动后台 heartbeat loop。
+- `subscribe(topics, listener)`：在 assignment 变化时触发 `ConsumerRebalanceListener.onPartitionsRevoked` / `onPartitionsAssigned`。
 - `poll(timeout)`：按当前 assignment 拉取消息，成功解码后推进本地 next offset。
 - `commitAsync()` / `commitSync(timeout)`：提交本轮已消费到的 offset，也就是最后一条已返回消息的 `offset + 1`。
 - `assign(partitions)`：用于本地测试或手动分区消费，不加入消费组，也不会启动 heartbeat。
 - `StellflowConsumerOptions`：纯 Java 配置对象，可被 Stellflux 或后续 Spring Boot starter 绑定，但 SDK core 不依赖 Spring。
 
-现阶段 `SyncGroup` 服务端协议尚未携带真实分区分配 payload，因此 SDK 在 `subscribe` 后使用 Metadata 返回的全部分区作为本地 assignment。等服务端补齐 group assignment 编码后，这里应切换为 coordinator 返回的正式分配结果。
+SDK 内部已经提供 `ConsumerSubscriptionPayload`、`ConsumerAssignmentPayload` 与 `ConsumerAssignmentPayloadCodec`，用于稳定表达订阅与分区分配。现阶段 `SyncGroup` 服务端协议尚未携带真实分区分配 payload，因此 SDK 在 `subscribe` 后使用 Metadata 返回的全部分区作为本地 assignment，并用该 assignment payload 驱动本地 rebalance 回调。等服务端补齐 group assignment 编码后，这里应切换为 coordinator 返回的正式分配结果。
 
 ## Admin 实现要点
 
