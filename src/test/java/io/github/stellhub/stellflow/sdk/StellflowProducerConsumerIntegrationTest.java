@@ -262,6 +262,71 @@ class StellflowProducerConsumerIntegrationTest {
     }
   }
 
+  @Test
+  void shouldPartitionAndBatchProducerRecords() throws Exception {
+    int port = findFreePort();
+    BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
+    try (MiniBroker broker = MiniBroker.start(port);
+        StellflowClientFactory factory =
+            StellflowClientFactory.create(
+                StellflowClientOptions.builder(endpoint.address())
+                    .clientId("stellflow-sdk-it-batch")
+                    .producerMaxBatchRecords(1024)
+                    .build())) {
+      StellflowProducer producer = factory.createProducer();
+      StellflowConsumer consumer = factory.createConsumer();
+
+      List<RecordMetadata> autoPartitionMetadata =
+          producer
+              .send(
+                  List.of(
+                      new ProducerRecord(
+                          "orders",
+                          "batch-key-0".getBytes(StandardCharsets.UTF_8),
+                          "auto-0".getBytes(StandardCharsets.UTF_8)),
+                      new ProducerRecord(
+                          "orders", null, "auto-1".getBytes(StandardCharsets.UTF_8))))
+              .get(10, TimeUnit.SECONDS);
+
+      assertEquals(2, autoPartitionMetadata.size());
+      assertEquals("orders", autoPartitionMetadata.get(0).topic());
+      assertEquals("orders", autoPartitionMetadata.get(1).topic());
+
+      List<RecordMetadata> batchMetadata =
+          producer
+              .send(
+                  List.of(
+                      new ProducerRecord(
+                          "orders",
+                          0,
+                          "batch-0".getBytes(StandardCharsets.UTF_8),
+                          "value-0".getBytes(StandardCharsets.UTF_8)),
+                      new ProducerRecord(
+                          "orders",
+                          0,
+                          "batch-1".getBytes(StandardCharsets.UTF_8),
+                          "value-1".getBytes(StandardCharsets.UTF_8))))
+              .get(10, TimeUnit.SECONDS);
+
+      assertEquals(2, batchMetadata.size());
+      assertEquals(0, batchMetadata.get(0).partition());
+      assertEquals(0, batchMetadata.get(1).partition());
+      assertEquals(batchMetadata.get(0).baseOffset() + 1, batchMetadata.get(1).baseOffset());
+
+      List<ConsumerRecord> records =
+          consumer
+              .fetch("orders", 0, batchMetadata.get(0).baseOffset(), 1024 * 1024)
+              .get(10, TimeUnit.SECONDS);
+
+      assertEquals(2, records.size());
+      assertEquals(batchMetadata.get(0).baseOffset(), records.get(0).offset());
+      assertEquals(batchMetadata.get(1).baseOffset(), records.get(1).offset());
+      assertArrayEquals("batch-0".getBytes(StandardCharsets.UTF_8), records.get(0).key());
+      assertArrayEquals("batch-1".getBytes(StandardCharsets.UTF_8), records.get(1).key());
+      consumer.close();
+    }
+  }
+
   private static int findFreePort() throws Exception {
     try (ServerSocket socket = new ServerSocket(0)) {
       return socket.getLocalPort();

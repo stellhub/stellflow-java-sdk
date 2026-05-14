@@ -13,6 +13,7 @@ import io.github.stellhub.stellflow.sdk.protocol.message.MetadataResponseBody;
 import io.github.stellhub.stellflow.sdk.protocol.message.MetadataTopicRequest;
 import io.github.stellhub.stellflow.sdk.protocol.message.MetadataTopicResponse;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -68,6 +69,15 @@ public class MetadataManager {
                     .orElseGet(() -> fallbackRoute(topic, partition)));
   }
 
+  /** 查询 topic 的分区编号列表，缺失时自动刷新 metadata。 */
+  public CompletableFuture<List<Integer>> partitionIds(String topic) {
+    List<Integer> cached = cachedPartitionIds(topic);
+    if (!cached.isEmpty()) {
+      return CompletableFuture.completedFuture(cached);
+    }
+    return refresh(List.of(topic)).thenApply(ignored -> cachedPartitionIds(topic));
+  }
+
   /** 移除指定 topic 的本地路由缓存。 */
   public void invalidate(String topic) {
     routes.keySet().removeIf(topicPartition -> topicPartition.topic().equals(topic));
@@ -117,5 +127,13 @@ public class MetadataManager {
 
   private PartitionRoute fallbackRoute(String topic, int partition) {
     return new PartitionRoute(topic, partition, 0, -1, bootstrapEndpoint(), List.of(), List.of());
+  }
+
+  private List<Integer> cachedPartitionIds(String topic) {
+    return routes.keySet().stream()
+        .filter(topicPartition -> topicPartition.topic().equals(topic))
+        .map(TopicPartition::partition)
+        .sorted(Comparator.naturalOrder())
+        .toList();
   }
 }

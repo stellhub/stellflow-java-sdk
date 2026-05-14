@@ -67,8 +67,7 @@ public class StellflowClientFactory implements AutoCloseable {
         connectionPool,
         metadataManager,
         clientId,
-        options.producerAcks(),
-        options.producerTimeoutMs(),
+        options.producerOptions(),
         options.retryPolicy(),
         false);
   }

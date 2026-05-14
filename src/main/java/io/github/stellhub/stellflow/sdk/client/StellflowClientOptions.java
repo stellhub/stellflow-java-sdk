@@ -4,6 +4,8 @@ import io.github.stellhub.stellflow.sdk.consumer.StellflowConsumerOptions;
 import io.github.stellhub.stellflow.sdk.network.BrokerEndpoint;
 import io.github.stellhub.stellflow.sdk.network.NettyStellflowClient;
 import io.github.stellhub.stellflow.sdk.observability.StellflowObservability;
+import io.github.stellhub.stellflow.sdk.producer.ProducerPartitioner;
+import io.github.stellhub.stellflow.sdk.producer.StellflowProducerOptions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,15 +19,12 @@ public record StellflowClientOptions(
     int maxFrameLength,
     Duration requestTimeout,
     RetryPolicy retryPolicy,
-    short producerAcks,
-    int producerTimeoutMs,
+    StellflowProducerOptions producerOptions,
     StellflowConsumerOptions consumerOptions,
     StellflowObservability observability) {
 
   public static final String DEFAULT_CLIENT_ID = "stellflow-java-sdk";
   public static final int DEFAULT_NETWORK_THREADS = 1;
-  public static final short DEFAULT_PRODUCER_ACKS = -1;
-  public static final int DEFAULT_PRODUCER_TIMEOUT_MS = 30_000;
 
   public StellflowClientOptions {
     if (bootstrapServers == null || bootstrapServers.isEmpty()) {
@@ -46,9 +45,8 @@ public record StellflowClientOptions(
       throw new IllegalArgumentException("requestTimeout must be positive");
     }
     retryPolicy = retryPolicy == null ? RetryPolicy.defaultPolicy() : retryPolicy;
-    if (producerTimeoutMs <= 0) {
-      throw new IllegalArgumentException("producerTimeoutMs must be positive");
-    }
+    producerOptions =
+        producerOptions == null ? StellflowProducerOptions.defaults() : producerOptions;
     consumerOptions =
         consumerOptions == null ? StellflowConsumerOptions.defaults(clientId) : consumerOptions;
     observability = observability == null ? StellflowObservability.global() : observability;
@@ -73,8 +71,7 @@ public record StellflowClientOptions(
     private int maxFrameLength = NettyStellflowClient.DEFAULT_MAX_FRAME_LENGTH;
     private Duration requestTimeout = NettyStellflowClient.DEFAULT_REQUEST_TIMEOUT;
     private RetryPolicy retryPolicy = RetryPolicy.defaultPolicy();
-    private short producerAcks = DEFAULT_PRODUCER_ACKS;
-    private int producerTimeoutMs = DEFAULT_PRODUCER_TIMEOUT_MS;
+    private StellflowProducerOptions producerOptions = StellflowProducerOptions.defaults();
     private StellflowConsumerOptions consumerOptions;
     private StellflowObservability observability = StellflowObservability.global();
 
@@ -142,13 +139,31 @@ public record StellflowClientOptions(
 
     /** 设置 Producer acks。 */
     public Builder producerAcks(short value) {
-      this.producerAcks = value;
+      this.producerOptions = producerOptions.withAcks(value);
       return this;
     }
 
     /** 设置 Producer timeoutMs。 */
     public Builder producerTimeoutMs(int value) {
-      this.producerTimeoutMs = value;
+      this.producerOptions = producerOptions.withTimeoutMs(value);
+      return this;
+    }
+
+    /** 设置 Producer 最大批记录数。 */
+    public Builder producerMaxBatchRecords(int value) {
+      this.producerOptions = producerOptions.withMaxBatchRecords(value);
+      return this;
+    }
+
+    /** 设置 Producer 分区器。 */
+    public Builder producerPartitioner(ProducerPartitioner value) {
+      this.producerOptions = producerOptions.withPartitioner(value);
+      return this;
+    }
+
+    /** 设置 Producer 配置。 */
+    public Builder producerOptions(StellflowProducerOptions value) {
+      this.producerOptions = value;
       return this;
     }
 
@@ -173,8 +188,7 @@ public record StellflowClientOptions(
           maxFrameLength,
           requestTimeout,
           retryPolicy,
-          producerAcks,
-          producerTimeoutMs,
+          producerOptions,
           consumerOptions,
           observability);
     }
