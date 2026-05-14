@@ -229,14 +229,16 @@ StellflowClientOptions options =
 try (StellflowClientFactory factory = StellflowClientFactory.create(options)) {
   StellflowProducer producer = factory.createProducer();
   StellflowConsumer consumer = factory.createConsumer();
+  StellflowAdminClient adminClient = factory.createAdminClient();
 
+  ClusterDescription cluster = adminClient.describeCluster().join();
   consumer.subscribe(List.of("orders")).join();
   List<ConsumerRecord> records = consumer.poll(Duration.ofSeconds(5)).join();
   consumer.commitSync(Duration.ofSeconds(5));
 }
 ```
 
-后续 Stellflux 或 Spring Boot starter 的自动装配层应只负责把外部配置绑定成 `StellflowClientOptions`，再暴露 `StellflowClientFactory`、`StellflowProducer` 和 `StellflowConsumer`，不要把 Spring 类型下沉到 SDK core。
+后续 Stellflux 或 Spring Boot starter 的自动装配层应只负责把外部配置绑定成 `StellflowClientOptions`，再暴露 `StellflowClientFactory`、`StellflowProducer`、`StellflowConsumer` 和 `StellflowAdminClient`，不要把 Spring 类型下沉到 SDK core。
 
 ### 7. Codec 层
 
@@ -319,10 +321,17 @@ SDK 内部已经提供 `ConsumerSubscriptionPayload`、`ConsumerAssignmentPayloa
 
 ## Admin 实现要点
 
-AdminClient 应复用同一套协议网络层和能力协商缓存，重点封装：
+AdminClient 复用同一套协议网络层、连接池和 Metadata 路由缓存。当前 SDK 已经提供查询型管理能力：
+
+- `apiVersions()`：向 bootstrap broker 发送 `ApiVersions`，获取 broker 支持的 API 版本与特性。
+- `metadata(topics)`：获取原始 `MetadataResponseBody`，用于高级调用方自行解析。
+- `describeCluster()`：基于 `Metadata` 返回 `clusterId`、controller broker、broker 列表和集群授权位。
+- `describeTopics(topics)`：基于 `Metadata` 返回 topic、partition、leader、replica、ISR 和 offline replica 信息。
+- `listOffsets(topic, partition, offsetSpec)` / `listOffsets(map)`：基于 Metadata leader 路由发送 `ListOffsets`，支持 earliest、latest 和 timestamp 查询。
+
+以下管理类 API 已在服务端协议中预留，但当前 Java SDK 还未实现请求/响应体 codec，因此不在第一版 AdminClient 暴露伪接口：
 
 - Topic 创建、删除、分区调整。
-- 集群状态查询。
 - Broker 健康检查。
 - Broker 下线或迁移管理。
 

@@ -3,6 +3,11 @@ package io.github.stellhub.stellflow.sdk;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import io.github.stellhub.stellflow.sdk.admin.ClusterDescription;
+import io.github.stellhub.stellflow.sdk.admin.ListOffsetsResult;
+import io.github.stellhub.stellflow.sdk.admin.OffsetSpec;
+import io.github.stellhub.stellflow.sdk.admin.StellflowAdminClient;
+import io.github.stellhub.stellflow.sdk.admin.TopicDescription;
 import io.github.stellhub.stellflow.sdk.client.RetryPolicy;
 import io.github.stellhub.stellflow.sdk.client.StellflowClientFactory;
 import io.github.stellhub.stellflow.sdk.client.StellflowClientOptions;
@@ -351,6 +356,56 @@ class StellflowProducerConsumerIntegrationTest {
   }
 
   @Test
+  void shouldDescribeClusterTopicsAndOffsetsFromAdminClient() throws Exception {
+    int port = findFreePort();
+    BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
+    try (MiniBroker broker = MiniBroker.start(port);
+        StellflowClientFactory factory =
+            StellflowClientFactory.create(
+                StellflowClientOptions.builder(endpoint.address())
+                    .clientId("stellflow-sdk-it-admin")
+                    .build())) {
+      StellflowProducer producer = factory.createProducer();
+      StellflowAdminClient adminClient = factory.createAdminClient();
+
+      producer
+          .send(
+              new ProducerRecord(
+                  "orders",
+                  0,
+                  "admin-key".getBytes(StandardCharsets.UTF_8),
+                  "admin-value".getBytes(StandardCharsets.UTF_8)))
+          .get(10, TimeUnit.SECONDS);
+
+      ApiVersionsResponseBody apiVersions = adminClient.apiVersions().get(10, TimeUnit.SECONDS);
+      assertEquals("mini-stellflow-broker", apiVersions.brokerSoftwareName());
+
+      ClusterDescription cluster = adminClient.describeCluster().get(10, TimeUnit.SECONDS);
+      assertEquals("mini-cluster", cluster.clusterId());
+      assertEquals(0, cluster.controllerId());
+      assertEquals(1, cluster.brokers().size());
+
+      List<TopicDescription> topics =
+          adminClient.describeTopics(List.of("orders")).get(10, TimeUnit.SECONDS);
+      assertEquals(1, topics.size());
+      assertEquals("orders", topics.getFirst().topic());
+      assertEquals(2, topics.getFirst().partitions().size());
+
+      ListOffsetsResult latest =
+          adminClient.listOffsets("orders", 0, OffsetSpec.latest()).get(10, TimeUnit.SECONDS);
+      assertEquals("orders", latest.topic());
+      assertEquals(0, latest.partition());
+      assertEquals(1L, latest.offset());
+
+      Map<TopicPartition, ListOffsetsResult> offsets =
+          adminClient
+              .listOffsets(Map.of(new TopicPartition("orders", 0), OffsetSpec.earliest()))
+              .get(10, TimeUnit.SECONDS);
+      assertEquals(0L, offsets.get(new TopicPartition("orders", 0)).offset());
+    }
+  }
+
+  @Test
   void shouldPartitionAndBatchProducerRecords() throws Exception {
     int port = findFreePort();
     BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
@@ -493,6 +548,8 @@ class StellflowProducerConsumerIntegrationTest {
         writeProduceResponse(body, readProduceRequest(reader));
       } else if (header.apiKey() == ApiKey.FETCH) {
         writeFetchResponse(body, readFetchRequest(reader));
+      } else if (header.apiKey() == ApiKey.LIST_OFFSETS) {
+        writeListOffsetsResponse(body, readListOffsetsRequest(reader));
       } else if (header.apiKey() == ApiKey.FIND_COORDINATOR) {
         readFindCoordinatorRequest(reader);
         writeFindCoordinatorResponse(body);
@@ -550,11 +607,12 @@ class StellflowProducerConsumerIntegrationTest {
     }
 
     private void writeApiVersionsResponse(BinaryWriter writer) {
-      writer.writeInt(10);
+      writer.writeInt(11);
       writeApiVersionRange(writer, ApiKey.API_VERSIONS);
       writeApiVersionRange(writer, ApiKey.METADATA);
       writeApiVersionRange(writer, ApiKey.PRODUCE);
       writeApiVersionRange(writer, ApiKey.FETCH);
+      writeApiVersionRange(writer, ApiKey.LIST_OFFSETS);
       writeApiVersionRange(writer, ApiKey.OFFSET_COMMIT);
       writeApiVersionRange(writer, ApiKey.OFFSET_FETCH);
       writeApiVersionRange(writer, ApiKey.FIND_COORDINATOR);
@@ -671,6 +729,41 @@ class StellflowProducerConsumerIntegrationTest {
           writer.writeLong(result.highWatermark());
           writer.writeInt(0);
           writer.writeBytes(result.records());
+        }
+      }
+    }
+
+    private ListOffsetsRequestView readListOffsetsRequest(BinaryReader reader) {
+      reader.readInt();
+      reader.readByte();
+      return new ListOffsetsRequestView(
+          reader.readArray(
+              () ->
+                  new ListOffsetsTopicView(
+                      reader.readNullableString(),
+                      reader.readArray(
+                          () ->
+                              new ListOffsetsPartitionView(
+                                  reader.readInt(),
+                                  reader.readInt(),
+                                  reader.readLong(),
+                                  reader.readInt())))));
+    }
+
+    private void writeListOffsetsResponse(BinaryWriter writer, ListOffsetsRequestView request) {
+      writer.writeInt(request.topics().size());
+      for (ListOffsetsTopicView topic : request.topics()) {
+        writer.writeNullableString(topic.topic());
+        writer.writeInt(topic.partitions().size());
+        for (ListOffsetsPartitionView partition : topic.partitions()) {
+          long offset =
+              state.listOffset(topic.topic(), partition.partition(), partition.timestamp());
+          writer.writeInt(partition.partition());
+          writer.writeShort(ErrorCode.NONE.code());
+          writer.writeInt(0);
+          writer.writeLong(partition.timestamp());
+          writer.writeLong(offset);
+          writer.writeLongArray(List.of(offset));
         }
       }
     }
@@ -829,6 +922,15 @@ class StellflowProducerConsumerIntegrationTest {
       return new FetchResult(partitionRecords.size(), writer.toByteArray());
     }
 
+    synchronized long listOffset(String topic, int partition, long timestamp) {
+      List<byte[]> partitionRecords =
+          records.getOrDefault(new BrokerTopicPartition(topic, partition), List.of());
+      if (timestamp == OffsetSpec.EARLIEST_TIMESTAMP) {
+        return 0;
+      }
+      return partitionRecords.size();
+    }
+
     synchronized void commit(
         String groupId, String topic, int partition, long offset, String metadata) {
       offsets.put(
@@ -862,4 +964,11 @@ class StellflowProducerConsumerIntegrationTest {
   private record OffsetFetchPartitionView(int partition) {}
 
   private record JoinGroupRequestView(String groupId, String memberId, int sessionTimeoutMs) {}
+
+  private record ListOffsetsRequestView(List<ListOffsetsTopicView> topics) {}
+
+  private record ListOffsetsTopicView(String topic, List<ListOffsetsPartitionView> partitions) {}
+
+  private record ListOffsetsPartitionView(
+      int partition, int currentLeaderEpoch, long timestamp, int maxNumOffsets) {}
 }

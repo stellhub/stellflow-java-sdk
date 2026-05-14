@@ -1,5 +1,6 @@
 package io.github.stellhub.stellflow.sdk.client;
 
+import io.github.stellhub.stellflow.sdk.admin.StellflowAdminClient;
 import io.github.stellhub.stellflow.sdk.consumer.StellflowConsumer;
 import io.github.stellhub.stellflow.sdk.consumer.StellflowConsumerOptions;
 import io.github.stellhub.stellflow.sdk.metadata.MetadataManager;
@@ -88,6 +89,18 @@ public class StellflowClientFactory implements AutoCloseable {
     ensureOpen();
     return new StellflowConsumer(
         connectionPool, metadataManager, clientId, consumerOptions, options.retryPolicy(), false);
+  }
+
+  /** 创建共享连接池的 AdminClient。 */
+  public StellflowAdminClient createAdminClient() {
+    return createAdminClient(options.clientId() + "-admin");
+  }
+
+  /** 创建共享连接池的 AdminClient。 */
+  public StellflowAdminClient createAdminClient(String clientId) {
+    ensureOpen();
+    return new StellflowAdminClient(
+        connectionPool, metadataManager, clientId, options.retryPolicy(), false);
   }
 
   /** 返回配置。 */
