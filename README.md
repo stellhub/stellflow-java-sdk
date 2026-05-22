@@ -150,6 +150,7 @@ Metadata 是客户端路由事实来源：
 - `bootstrap.servers` 只用于初次连接。
 - 启动后先请求 `ApiVersions`，再请求 `Metadata`。
 - Producer 根据 `MetadataResponse` 中的 partition leader 路由写入。
+- Producer 默认会在目标 topic 不存在时通过 `CreateTopic` 自动创建 topic，再刷新 Metadata 后继续发送。
 - Consumer 根据分区 leader 路由 Fetch。
 - 当收到 `NOT_LEADER_OR_FOLLOWER`、`LEADER_NOT_AVAILABLE`、`BROKER_NOT_AVAILABLE`、`UNSUPPORTED_VERSION` 等错误时刷新 metadata 或能力缓存。
 
@@ -271,7 +272,8 @@ Producer 以 RecordBatch 为一等传输单位：
 - `ProducerRecord(topic, key, value)` 不指定分区时，会先通过 Metadata 获取分区列表，再由 `ProducerPartitioner` 选择分区。
 - 默认 `DefaultProducerPartitioner` 在 key 非空时使用 key hash；key 为空时使用 per-topic round-robin。
 - `send(List<ProducerRecord>)` 会按 topic / partition 聚合，同一分区内的多条 record 编码进同一个 RecordBatchSet，减少 Produce 请求碎片。
-- `StellflowProducerOptions` 暴露 `acks`、`timeoutMs`、`maxBatchRecords` 和 `partitioner`，可直接由 Stellflux 或后续 Spring Boot starter 绑定。
+- `StellflowProducerOptions` 暴露 `acks`、`timeoutMs`、`maxBatchRecords`、`partitioner`、`autoCreateTopics` 和 `autoCreateTopicPartitionCount`，可直接由 Stellflux 或后续 Spring Boot starter 绑定。
+- `autoCreateTopics` 默认启用。Producer 在 Metadata 返回空分区或未知 topic 时，会先发送 `CreateTopic`，默认创建 2 个分区；如果消息显式指定了更大的 partition，则创建分区数会至少覆盖到该 partition。
 - `acks` 支持 `0`、`1`、`-1`。
 - 分区级返回以 `ProducePartitionResponse.errorCode` 为准，允许同一请求部分成功、部分失败。
 
@@ -332,7 +334,7 @@ AdminClient 复用同一套协议网络层、连接池和 Metadata 路由缓存�
 - `createTopic(topic, partitionCount)`：通过服务端 `CreateTopic` 数据面管理协议创建指定分区数的 topic。
 - `createTopicIfAbsent(topic, partitionCount)`：先查询 Metadata，topic 不存在时再调用 `CreateTopic`，用于业务启动阶段自动补齐 topic。
 
-Producer 不会在发送消息时隐式创建 topic。需要自动补齐 topic 的应用应在启动或发布前显式调用 `createTopicIfAbsent`，这样可以把 topic 初始化失败暴露在管理阶段，而不是把 `UNKNOWN_TOPIC_OR_PARTITION` 混入普通发送链路。
+Producer 默认会在发送消息时自动创建缺失 topic。需要在启动阶段提前暴露初始化失败的应用，也可以显式调用 `createTopicIfAbsent`；需要禁止发送链路自动建 topic 时，可以把 `StellflowProducerOptions.autoCreateTopics` 设为 `false`。
 
 以下管理类 API 已在服务端协议中预留，但当前 Java SDK 还未实现请求/响应体 codec，因此不在第一版 AdminClient 暴露伪接口：
 

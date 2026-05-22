@@ -20,6 +20,8 @@ import io.github.stellhub.stellflow.sdk.protocol.message.ProduceResponseBody;
 import io.github.stellhub.stellflow.sdk.protocol.message.ProduceTopicData;
 import io.github.stellhub.stellflow.sdk.protocol.message.RecordBatch;
 import io.github.stellhub.stellflow.sdk.protocol.message.StellflowRecord;
+import io.github.stellhub.stellflow.sdk.protocol.message.TopicAdminRequestBody;
+import io.github.stellhub.stellflow.sdk.protocol.message.TopicAdminResponseBody;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -149,7 +151,10 @@ public class StellflowProducer implements AutoCloseable {
         List<ProducerRecord> immutableRecords = List.copyOf(records);
         return AsyncRetrier.execute(
                 retryPolicy,
-                () -> resolveRecords(immutableRecords).thenCompose(this::sendResolvedOnce),
+                () ->
+                        ensureTopics(immutableRecords)
+                                .thenCompose(ignored -> resolveRecords(immutableRecords))
+                                .thenCompose(this::sendResolvedOnce),
                 throwable -> isRetryable(immutableRecords, throwable));
     }
 
@@ -176,6 +181,58 @@ public class StellflowProducer implements AutoCloseable {
                 .thenApply(ignored -> futures.stream().map(CompletableFuture::join).toList());
     }
 
+    private CompletableFuture<Void> ensureTopics(List<ProducerRecord> records) {
+        if (metadataManager == null || !options.autoCreateTopics()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, Integer> topicPartitions = requiredTopicPartitions(records);
+        List<CompletableFuture<Void>> futures =
+                topicPartitions.entrySet().stream()
+                        .map(entry -> ensureTopic(entry.getKey(), entry.getValue()))
+                        .toList();
+        return CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new));
+    }
+
+    private Map<String, Integer> requiredTopicPartitions(List<ProducerRecord> records) {
+        Map<String, Integer> topicPartitions = new LinkedHashMap<>();
+        for (ProducerRecord record : records) {
+            int partitionCount = options.autoCreateTopicPartitionCount();
+            if (record.partition() != ProducerRecord.NO_PARTITION) {
+                partitionCount = Math.max(partitionCount, record.partition() + 1);
+            }
+            topicPartitions.merge(record.topic(), partitionCount, Math::max);
+        }
+        return topicPartitions;
+    }
+
+    private CompletableFuture<Void> ensureTopic(String topic, int partitionCount) {
+        return metadataManager
+                .partitionIds(topic)
+                .thenCompose(
+                        partitions -> {
+                            if (!partitions.isEmpty()) {
+                                return CompletableFuture.completedFuture(null);
+                            }
+                            return createTopic(topic, partitionCount)
+                                    .thenCompose(ignored -> metadataManager.refresh(List.of(topic)))
+                                    .thenApply(ignored -> null);
+                        });
+    }
+
+    private CompletableFuture<Void> createTopic(String topic, int partitionCount) {
+        TopicAdminRequestBody request =
+                new TopicAdminRequestBody(topic, partitionCount, -1, -1, -1, List.of(), List.of());
+        return connectionPool
+                .send(
+                        metadataManager.bootstrapEndpoint(),
+                        ApiKey.CREATE_TOPIC,
+                        ProtocolConstants.DEFAULT_API_VERSION,
+                        clientId,
+                        request)
+                .thenApply(response -> castTopicAdminResponse(response, topic))
+                .thenAccept(this::requireSuccessfulTopicCreation);
+    }
+
     private CompletableFuture<Integer> resolvePartition(ProducerRecord record) {
         if (record.partition() != ProducerRecord.NO_PARTITION) {
             return CompletableFuture.completedFuture(record.partition());
@@ -194,6 +251,31 @@ public class StellflowProducer implements AutoCloseable {
                                     .partitioner()
                                     .partition(record.topic(), record.key(), record.value(), partitions);
                         });
+    }
+
+    private TopicAdminResponseBody castTopicAdminResponse(ResponseMessage response, String topic) {
+        if (response.header().errorCode() != ErrorCode.NONE) {
+            throw new StellflowClientException(
+                    "create topic failed: " + response.header().errorCode(), response.header().errorCode());
+        }
+        if (!(response.body() instanceof TopicAdminResponseBody body)) {
+            throw new IllegalStateException(
+                    "unexpected create topic response body: " + response.body().getClass());
+        }
+        if (!topic.equals(body.topic())) {
+            throw new IllegalStateException("create topic response mismatch: " + body.topic());
+        }
+        return body;
+    }
+
+    private void requireSuccessfulTopicCreation(TopicAdminResponseBody body) {
+        for (var partition : body.partitions()) {
+            if (partition.errorCode() != ErrorCode.NONE) {
+                throw new StellflowClientException(
+                        "create topic failed: " + partition.errorCode(), partition.errorCode());
+            }
+        }
+        metadataManager.invalidate(body.topic());
     }
 
     private CompletableFuture<List<RecordMetadata>> sendResolvedOnce(List<PendingRecord> records) {

@@ -155,6 +155,18 @@ public record StellflowClientOptions(
             return this;
         }
 
+        /** 设置 Producer 是否自动创建缺失 Topic。 */
+        public Builder producerAutoCreateTopics(boolean value) {
+            this.producerOptions = producerOptions.withAutoCreateTopics(value);
+            return this;
+        }
+
+        /** 设置 Producer 自动创建 Topic 时的默认分区数。 */
+        public Builder producerAutoCreateTopicPartitionCount(int value) {
+            this.producerOptions = producerOptions.withAutoCreateTopicPartitionCount(value);
+            return this;
+        }
+
         /** 设置 Producer 分区器。 */
         public Builder producerPartitioner(ProducerPartitioner value) {
             this.producerOptions = producerOptions.withPartitioner(value);

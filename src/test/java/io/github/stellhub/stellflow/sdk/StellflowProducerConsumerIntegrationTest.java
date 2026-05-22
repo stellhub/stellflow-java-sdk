@@ -418,6 +418,38 @@ class StellflowProducerConsumerIntegrationTest {
     }
 
     @Test
+    void shouldAutoCreateMissingTopicBeforeProducing() throws Exception {
+        int port = findFreePort();
+        BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
+        try (MiniBroker broker = MiniBroker.start(port);
+                StellflowClientFactory factory =
+                        StellflowClientFactory.create(
+                                StellflowClientOptions.builder(endpoint.address())
+                                        .clientId("stellflow-sdk-it-auto-create")
+                                        .build())) {
+            StellflowProducer producer = factory.createProducer();
+            StellflowAdminClient adminClient = factory.createAdminClient();
+
+            RecordMetadata metadata =
+                    producer
+                            .send(
+                                    new ProducerRecord(
+                                            "order",
+                                            "order-key".getBytes(StandardCharsets.UTF_8),
+                                            "order-value".getBytes(StandardCharsets.UTF_8)))
+                            .get(10, TimeUnit.SECONDS);
+
+            assertEquals("order", metadata.topic());
+
+            List<TopicDescription> topics =
+                    adminClient.describeTopics(List.of("order")).get(10, TimeUnit.SECONDS);
+            assertEquals(1, topics.size());
+            assertEquals(ErrorCode.NONE, topics.getFirst().errorCode());
+            assertEquals(2, topics.getFirst().partitions().size());
+        }
+    }
+
+    @Test
     void shouldPartitionAndBatchProducerRecords() throws Exception {
         int port = findFreePort();
         BrokerEndpoint endpoint = new BrokerEndpoint("127.0.0.1", port);
@@ -689,6 +721,14 @@ class StellflowProducerConsumerIntegrationTest {
             writer.writeNullableString(null);
             writer.writeInt(topics.size());
             for (String topic : topics) {
+                if (!state.containsTopic(topic)) {
+                    writer.writeShort(ErrorCode.UNKNOWN_TOPIC_OR_PARTITION.code());
+                    writer.writeNullableString(topic);
+                    writer.writeBoolean(false);
+                    writer.writeInt(0);
+                    writer.writeInt(0);
+                    continue;
+                }
                 writer.writeShort(ErrorCode.NONE.code());
                 writer.writeNullableString(topic);
                 writer.writeBoolean(false);
@@ -955,6 +995,10 @@ class StellflowProducerConsumerIntegrationTest {
 
         synchronized void createTopic(String topic, int partitionCount) {
             partitionCounts.put(topic, partitionCount);
+        }
+
+        synchronized boolean containsTopic(String topic) {
+            return partitionCounts.containsKey(topic);
         }
 
         synchronized int partitionCount(String topic) {
