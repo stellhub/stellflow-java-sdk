@@ -10,7 +10,7 @@ Stellflow 服务端保留 Kafka 风格的 Topic / Partition / Replica / ISR / Of
 
 - `StellflowProducer`：消息批量发送、分区路由、acks、超时、重试与后续幂等能力。
 - `StellflowConsumer`：元数据发现、Fetch 长轮询、位点管理、消费组协调与提交位点。
-- `StellflowAdminClient`：Topic、Broker、集群状态等管理接口。
+- `StellflowAdminClient`：Topic 创建、自动创建、Broker、集群状态等管理接口。
 - `stellflow-protocol`：协议头、请求体、响应体、错误码、API Key、RecordBatch 与兼容性测试基线。
 - `stellflow-network`：基于 TCP 长连接的数据面网络层，负责帧编解码、请求关联、连接池与重连。
 
@@ -231,6 +231,7 @@ try (StellflowClientFactory factory = StellflowClientFactory.create(options)) {
   StellflowConsumer consumer = factory.createConsumer();
   StellflowAdminClient adminClient = factory.createAdminClient();
 
+  adminClient.createTopicIfAbsent("orders", 2).join();
   ClusterDescription cluster = adminClient.describeCluster().join();
   consumer.subscribe(List.of("orders")).join();
   List<ConsumerRecord> records = consumer.poll(Duration.ofSeconds(5)).join();
@@ -321,17 +322,21 @@ SDK 内部已经提供 `ConsumerSubscriptionPayload`、`ConsumerAssignmentPayloa
 
 ## Admin 实现要点
 
-AdminClient 复用同一套协议网络层、连接池和 Metadata 路由缓存。当前 SDK 已经提供查询型管理能力：
+AdminClient 复用同一套协议网络层、连接池和 Metadata 路由缓存。当前 SDK 已经提供查询型管理能力和 Topic 创建能力：
 
 - `apiVersions()`：向 bootstrap broker 发送 `ApiVersions`，获取 broker 支持的 API 版本与特性。
 - `metadata(topics)`：获取原始 `MetadataResponseBody`，用于高级调用方自行解析。
 - `describeCluster()`：基于 `Metadata` 返回 `clusterId`、controller broker、broker 列表和集群授权位。
 - `describeTopics(topics)`：基于 `Metadata` 返回 topic、partition、leader、replica、ISR 和 offline replica 信息。
 - `listOffsets(topic, partition, offsetSpec)` / `listOffsets(map)`：基于 Metadata leader 路由发送 `ListOffsets`，支持 earliest、latest 和 timestamp 查询。
+- `createTopic(topic, partitionCount)`：通过服务端 `CreateTopic` 数据面管理协议创建指定分区数的 topic。
+- `createTopicIfAbsent(topic, partitionCount)`：先查询 Metadata，topic 不存在时再调用 `CreateTopic`，用于业务启动阶段自动补齐 topic。
+
+Producer 不会在发送消息时隐式创建 topic。需要自动补齐 topic 的应用应在启动或发布前显式调用 `createTopicIfAbsent`，这样可以把 topic 初始化失败暴露在管理阶段，而不是把 `UNKNOWN_TOPIC_OR_PARTITION` 混入普通发送链路。
 
 以下管理类 API 已在服务端协议中预留，但当前 Java SDK 还未实现请求/响应体 codec，因此不在第一版 AdminClient 暴露伪接口：
 
-- Topic 创建、删除、分区调整。
+- Topic 删除、分区调整。
 - Broker 健康检查。
 - Broker 下线或迁移管理。
 

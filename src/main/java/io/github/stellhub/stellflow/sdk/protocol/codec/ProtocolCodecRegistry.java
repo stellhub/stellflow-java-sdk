@@ -67,6 +67,7 @@ public class ProtocolCodecRegistry {
         registry.registerRequestCodec(new JoinGroupRequestBodyCodec());
         registry.registerRequestCodec(new HeartbeatRequestBodyCodec());
         registry.registerRequestCodec(new SyncGroupRequestBodyCodec());
+        registry.registerRequestCodec(new TopicAdminRequestBodyCodec(ApiKey.CREATE_TOPIC));
         registry.registerResponseCodec(new ApiVersionsResponseBodyCodec());
         registry.registerResponseCodec(new MetadataResponseBodyCodec());
         registry.registerResponseCodec(new ProduceResponseBodyCodec());
@@ -78,6 +79,7 @@ public class ProtocolCodecRegistry {
         registry.registerResponseCodec(new JoinGroupResponseBodyCodec());
         registry.registerResponseCodec(new HeartbeatResponseBodyCodec());
         registry.registerResponseCodec(new SyncGroupResponseBodyCodec());
+        registry.registerResponseCodec(new TopicAdminResponseBodyCodec(ApiKey.CREATE_TOPIC));
         return registry;
     }
 

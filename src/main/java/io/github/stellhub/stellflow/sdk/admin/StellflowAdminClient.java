@@ -21,6 +21,9 @@ import io.github.stellhub.stellflow.sdk.protocol.message.ListOffsetsTopicRespons
 import io.github.stellhub.stellflow.sdk.protocol.message.MetadataPartitionResponse;
 import io.github.stellhub.stellflow.sdk.protocol.message.MetadataResponseBody;
 import io.github.stellhub.stellflow.sdk.protocol.message.MetadataTopicResponse;
+import io.github.stellhub.stellflow.sdk.protocol.message.TopicAdminPartitionResponse;
+import io.github.stellhub.stellflow.sdk.protocol.message.TopicAdminRequestBody;
+import io.github.stellhub.stellflow.sdk.protocol.message.TopicAdminResponseBody;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -88,6 +91,44 @@ public class StellflowAdminClient implements AutoCloseable {
     public CompletableFuture<List<TopicDescription>> describeTopics(Collection<String> topics) {
         return metadata(topics)
                 .thenApply(response -> response.topics().stream().map(this::toTopicDescription).toList());
+    }
+
+    /** 创建 Topic。 */
+    public CompletableFuture<CreateTopicResult> createTopic(String topic, int partitionCount) {
+        validateTopicCreation(topic, partitionCount);
+        return execute(
+                        () ->
+                                connectionPool.send(
+                                        metadataManager.bootstrapEndpoint(),
+                                        ApiKey.CREATE_TOPIC,
+                                        ProtocolConstants.DEFAULT_API_VERSION,
+                                        clientId,
+                                        new TopicAdminRequestBody(
+                                                topic, partitionCount, -1, -1, -1, List.of(), List.of())))
+                .thenApply(response -> castBody(response, TopicAdminResponseBody.class))
+                .thenApply(this::toCreateTopicResult)
+                .thenApply(this::requireSuccessfulCreateTopicResult)
+                .thenApply(
+                        result -> {
+                            metadataManager.invalidate(result.topic());
+                            return result;
+                        });
+    }
+
+    /** 当 Topic 不存在时自动创建。 */
+    public CompletableFuture<CreateTopicResult> createTopicIfAbsent(
+            String topic, int partitionCount) {
+        validateTopicCreation(topic, partitionCount);
+        return describeTopics(List.of(topic))
+                .thenCompose(
+                        descriptions ->
+                                descriptions.stream()
+                                        .filter(description -> topic.equals(description.topic()))
+                                        .filter(description -> description.errorCode() == ErrorCode.NONE)
+                                        .findFirst()
+                                        .map(this::existingCreateTopicResult)
+                                        .map(CompletableFuture::completedFuture)
+                                        .orElseGet(() -> createTopic(topic, partitionCount)));
     }
 
     /** 查询单个分区 offset。 */
@@ -222,6 +263,50 @@ public class StellflowAdminClient implements AutoCloseable {
                 partition.replicaNodes(),
                 partition.isrNodes(),
                 partition.offlineReplicaNodes());
+    }
+
+    private CreateTopicResult toCreateTopicResult(TopicAdminResponseBody response) {
+        return new CreateTopicResult(
+                response.topic(),
+                true,
+                response.partitions().stream().map(this::toCreateTopicPartitionResult).toList());
+    }
+
+    private CreateTopicPartitionResult toCreateTopicPartitionResult(
+            TopicAdminPartitionResponse partition) {
+        return new CreateTopicPartitionResult(
+                partition.partition(), partition.errorCode(), partition.leaderEpoch());
+    }
+
+    private CreateTopicResult existingCreateTopicResult(TopicDescription description) {
+        return new CreateTopicResult(
+                description.topic(),
+                false,
+                description.partitions().stream()
+                        .map(
+                                partition ->
+                                        new CreateTopicPartitionResult(
+                                                partition.partition(), partition.errorCode(), partition.leaderEpoch()))
+                        .toList());
+    }
+
+    private CreateTopicResult requireSuccessfulCreateTopicResult(CreateTopicResult result) {
+        for (CreateTopicPartitionResult partition : result.partitions()) {
+            if (partition.errorCode() != ErrorCode.NONE) {
+                throw new StellflowClientException(
+                        "create topic failed: " + partition.errorCode(), partition.errorCode());
+            }
+        }
+        return result;
+    }
+
+    private void validateTopicCreation(String topic, int partitionCount) {
+        if (topic == null || topic.isBlank()) {
+            throw new IllegalArgumentException("topic must not be blank");
+        }
+        if (partitionCount <= 0) {
+            throw new IllegalArgumentException("partitionCount must be positive");
+        }
     }
 
     private ListOffsetsResult findListOffsetsResult(

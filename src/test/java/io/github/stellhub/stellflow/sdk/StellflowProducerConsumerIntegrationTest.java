@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.github.stellhub.stellflow.sdk.admin.ClusterDescription;
+import io.github.stellhub.stellflow.sdk.admin.CreateTopicResult;
 import io.github.stellhub.stellflow.sdk.admin.ListOffsetsResult;
 import io.github.stellhub.stellflow.sdk.admin.OffsetSpec;
 import io.github.stellhub.stellflow.sdk.admin.StellflowAdminClient;
@@ -391,6 +392,17 @@ class StellflowProducerConsumerIntegrationTest {
             assertEquals("orders", topics.getFirst().topic());
             assertEquals(2, topics.getFirst().partitions().size());
 
+            CreateTopicResult created = adminClient.createTopic("audit", 3).get(10, TimeUnit.SECONDS);
+            assertEquals("audit", created.topic());
+            assertEquals(true, created.created());
+            assertEquals(3, created.partitions().size());
+
+            List<TopicDescription> createdTopics =
+                    adminClient.describeTopics(List.of("audit")).get(10, TimeUnit.SECONDS);
+            assertEquals(1, createdTopics.size());
+            assertEquals("audit", createdTopics.getFirst().topic());
+            assertEquals(3, createdTopics.getFirst().partitions().size());
+
             ListOffsetsResult latest =
                     adminClient.listOffsets("orders", 0, OffsetSpec.latest()).get(10, TimeUnit.SECONDS);
             assertEquals("orders", latest.topic());
@@ -550,6 +562,8 @@ class StellflowProducerConsumerIntegrationTest {
                 writeFetchResponse(body, readFetchRequest(reader));
             } else if (header.apiKey() == ApiKey.LIST_OFFSETS) {
                 writeListOffsetsResponse(body, readListOffsetsRequest(reader));
+            } else if (header.apiKey() == ApiKey.CREATE_TOPIC) {
+                writeTopicAdminResponse(body, readTopicAdminRequest(reader));
             } else if (header.apiKey() == ApiKey.FIND_COORDINATOR) {
                 readFindCoordinatorRequest(reader);
                 writeFindCoordinatorResponse(body);
@@ -607,12 +621,13 @@ class StellflowProducerConsumerIntegrationTest {
         }
 
         private void writeApiVersionsResponse(BinaryWriter writer) {
-            writer.writeInt(11);
+            writer.writeInt(12);
             writeApiVersionRange(writer, ApiKey.API_VERSIONS);
             writeApiVersionRange(writer, ApiKey.METADATA);
             writeApiVersionRange(writer, ApiKey.PRODUCE);
             writeApiVersionRange(writer, ApiKey.FETCH);
             writeApiVersionRange(writer, ApiKey.LIST_OFFSETS);
+            writeApiVersionRange(writer, ApiKey.CREATE_TOPIC);
             writeApiVersionRange(writer, ApiKey.OFFSET_COMMIT);
             writeApiVersionRange(writer, ApiKey.OFFSET_FETCH);
             writeApiVersionRange(writer, ApiKey.FIND_COORDINATOR);
@@ -677,8 +692,9 @@ class StellflowProducerConsumerIntegrationTest {
                 writer.writeShort(ErrorCode.NONE.code());
                 writer.writeNullableString(topic);
                 writer.writeBoolean(false);
-                writer.writeInt(2);
-                for (int partition = 0; partition < 2; partition++) {
+                int partitionCount = state.partitionCount(topic);
+                writer.writeInt(partitionCount);
+                for (int partition = 0; partition < partitionCount; partition++) {
                     writer.writeShort(ErrorCode.NONE.code());
                     writer.writeInt(partition);
                     writer.writeInt(0);
@@ -706,6 +722,35 @@ class StellflowProducerConsumerIntegrationTest {
                     writer.writeLong(-1);
                     writer.writeLong(0);
                 }
+            }
+        }
+
+        private TopicAdminRequestView readTopicAdminRequest(BinaryReader reader) {
+            String topic = reader.readNullableString();
+            int partitionCount = reader.readInt();
+            reader.readInt();
+            reader.readInt();
+            reader.readInt();
+            reader.readIntArray();
+            reader.readIntArray();
+            return new TopicAdminRequestView(topic, partitionCount);
+        }
+
+        private void writeTopicAdminResponse(BinaryWriter writer, TopicAdminRequestView request) {
+            writer.writeNullableString(request.topic());
+            if (request.partitionCount() <= 0) {
+                writer.writeInt(1);
+                writer.writeInt(-1);
+                writer.writeShort(ErrorCode.INVALID_REQUEST.code());
+                writer.writeInt(0);
+                return;
+            }
+            state.createTopic(request.topic(), request.partitionCount());
+            writer.writeInt(request.partitionCount());
+            for (int partition = 0; partition < request.partitionCount(); partition++) {
+                writer.writeInt(partition);
+                writer.writeShort(ErrorCode.NONE.code());
+                writer.writeInt(0);
             }
         }
 
@@ -888,6 +933,7 @@ class StellflowProducerConsumerIntegrationTest {
         private final int port;
         private final Map<BrokerTopicPartition, List<byte[]>> records = new HashMap<>();
         private final Map<GroupTopicPartition, OffsetEntry> offsets = new HashMap<>();
+        private final Map<String, Integer> partitionCounts = new HashMap<>();
 
         private InMemoryBrokerState(int port) {
             this.port = port;
@@ -898,12 +944,21 @@ class StellflowProducerConsumerIntegrationTest {
         }
 
         synchronized long append(String topic, int partition, byte[] value) {
+            partitionCounts.merge(topic, Math.max(2, partition + 1), Math::max);
             List<byte[]> partitionRecords =
                     records.computeIfAbsent(
                             new BrokerTopicPartition(topic, partition), ignored -> new ArrayList<>());
             long baseOffset = partitionRecords.size();
             partitionRecords.add(value.clone());
             return baseOffset;
+        }
+
+        synchronized void createTopic(String topic, int partitionCount) {
+            partitionCounts.put(topic, partitionCount);
+        }
+
+        synchronized int partitionCount(String topic) {
+            return partitionCounts.getOrDefault(topic, 2);
         }
 
         synchronized FetchResult fetch(String topic, int partition, long offset, int maxBytes) {
@@ -971,4 +1026,6 @@ class StellflowProducerConsumerIntegrationTest {
 
     private record ListOffsetsPartitionView(
             int partition, int currentLeaderEpoch, long timestamp, int maxNumOffsets) {}
+
+    private record TopicAdminRequestView(String topic, int partitionCount) {}
 }
