@@ -32,9 +32,9 @@ public final class AsyncRetrier {
             return operation
                     .get()
                     .handle(
-                            (value, throwable) -> {
+                            (val, throwable) -> {
                                 if (throwable == null) {
-                                    return CompletableFuture.completedFuture(value);
+                                    return CompletableFuture.completedFuture(val);
                                 }
                                 Throwable cause = unwrap(throwable);
                                 if (attempt >= retryPolicy.maxAttempts() || !retryable.test(cause)) {
@@ -44,7 +44,7 @@ public final class AsyncRetrier {
                                         .thenCompose(
                                                 ignored -> attempt(retryPolicy, operation, retryable, attempt + 1));
                             })
-                    .thenCompose(value -> value);
+                    .thenCompose(val -> val);
         } catch (Throwable throwable) {
             Throwable cause = unwrap(throwable);
             if (attempt >= retryPolicy.maxAttempts() || !retryable.test(cause)) {

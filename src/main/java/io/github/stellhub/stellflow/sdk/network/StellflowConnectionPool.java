@@ -73,10 +73,10 @@ public class StellflowConnectionPool implements AutoCloseable {
     public CompletableFuture<NettyStellflowClient> connect(BrokerEndpoint endpoint) {
         return clients.computeIfAbsent(
                 endpoint,
-                value -> {
-                    LOGGER.log(System.Logger.Level.DEBUG, "Creating Stellflow pooled connection {0}", value);
+                val -> {
+                    LOGGER.log(System.Logger.Level.DEBUG, "Creating Stellflow pooled connection {0}", val);
                     return new NettyStellflowClient(
-                                    value,
+                            val,
                                     registry,
                                     eventLoopGroup,
                                     false,

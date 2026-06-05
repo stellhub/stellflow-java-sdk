@@ -249,7 +249,7 @@ public class NettyStellflowClient implements AutoCloseable {
 
     /** 返回下一个 correlationId。 */
     public int nextCorrelationId() {
-        return correlationIdGenerator.updateAndGet(value -> value == Integer.MAX_VALUE ? 1 : value + 1);
+        return correlationIdGenerator.updateAndGet(val -> val == Integer.MAX_VALUE ? 1 : val + 1);
     }
 
     @Override

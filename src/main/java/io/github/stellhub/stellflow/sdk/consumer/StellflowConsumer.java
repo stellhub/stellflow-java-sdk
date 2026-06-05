@@ -365,9 +365,9 @@ public class StellflowConsumer implements AutoCloseable {
                             OffsetCommitResponseBody responseBody = (OffsetCommitResponseBody) response.body();
                             OffsetCommitPartitionResponse partitionResponse =
                                     responseBody.topics().stream()
-                                            .filter(value -> value.topic().equals(topic))
-                                            .flatMap(value -> value.partitions().stream())
-                                            .filter(value -> value.partition() == partition)
+                                            .filter(val -> val.topic().equals(topic))
+                                            .flatMap(val -> val.partitions().stream())
+                                            .filter(val -> val.partition() == partition)
                                             .findFirst()
                                             .orElseThrow(
                                                     () -> new IllegalStateException("missing offset commit response"));
@@ -395,9 +395,9 @@ public class StellflowConsumer implements AutoCloseable {
                             OffsetFetchResponseBody responseBody = (OffsetFetchResponseBody) response.body();
                             OffsetFetchPartitionResponse partitionResponse =
                                     responseBody.topics().stream()
-                                            .filter(value -> value.topic().equals(topic))
-                                            .flatMap(value -> value.partitions().stream())
-                                            .filter(value -> value.partition() == partition)
+                                            .filter(val -> val.topic().equals(topic))
+                                            .flatMap(val -> val.partitions().stream())
+                                            .filter(val -> val.partition() == partition)
                                             .findFirst()
                                             .orElseThrow(
                                                     () -> new IllegalStateException("missing offset fetch response"));
@@ -576,7 +576,7 @@ public class StellflowConsumer implements AutoCloseable {
                 body.responses().stream()
                         .filter(topicResponse -> topicResponse.topic().equals(topic))
                         .flatMap(topicResponse -> topicResponse.partitions().stream())
-                        .filter(value -> value.partition() == partition)
+                        .filter(val -> val.partition() == partition)
                         .findFirst()
                         .orElseThrow(() -> new IllegalStateException("missing fetch partition response"));
         if (partitionResponse.errorCode() != ErrorCode.NONE) {
